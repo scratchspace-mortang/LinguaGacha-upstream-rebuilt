@@ -1,0 +1,383 @@
+commit 3f23c38525170666f81d747a4721d6afcb13cf79
+Author:     mortang2410 <mortang2410@totally.mail>
+AuthorDate: Sat Sep 5 01:26:58 2026 +0700
+Commit:     mortang2410 <mortang2410@totally.mail>
+CommitDate: Sat Sep 5 01:26:58 2026 +0700
+
+    fix(backend): bound data: URL diagnostic output to 256-char max
+    
+    Previously url_diagnostic() returned the full data: URL meta-prefix
+    (up to the first comma) without any length cap. A malicious or
+    pathological data: URL with a very long meta section (e.g.
+    data:text/html;charset=utf-8;base64,<very long>) could bloat
+    stderr logs and leak content into diagnostic output.
+    
+    Now: no-comma data URLs return INVALID_DATA_URL_HEAD ("<invalid>")
+    instead of the full href; valid meta-prefix is capped at 256 chars.
+    
+    P2 finding from codex review of 0fa13e4.
+
+diff --git a/src/backend/network/system-proxy-http-client.ts b/src/backend/network/system-proxy-http-client.ts
+index e5c483e..e3794d2 100644
+--- a/src/backend/network/system-proxy-http-client.ts
++++ b/src/backend/network/system-proxy-http-client.ts
+@@ -223,14 +223,25 @@ function read_request_url(input: Parameters<typeof globalThis.fetch>[0]): URL {
+  * 拼装代理诊断输出，避免把查询字符串与 userinfo 写进 stderr：
+  * 自定义模型端点常用 query 携带 API key 与签名，data: URL 的 base64 payload
+  * 也可能携带内容。诊断需要的只是路由信息（协议 + 主机），其他字段省略。
++ * data: URL 的 meta 段（mimetype 与可选 ;base64 等）按
++ * MAX_DATA_URL_DIAGNOSTIC_PREFIX 截断，避免用户控制的长 meta
++ * 把任意字节塞进 stderr；无逗号的非法 data URL 不暴露原文。
+  */
++const MAX_DATA_URL_DIAGNOSTIC_PREFIX = 256;
++const INVALID_DATA_URL_HEAD = "<invalid>";
++
+ function url_diagnostic(url: URL): Record<string, unknown> {
+   if (url.protocol === "data:") {
+-    // data:<mime>;base64,<payload>：协议本身就是诊断信息，截断到 mime 前缀。
+-    // 没有逗号的非法 data URL 走完整 href——它本来就不会被处理，泄漏面小。
+     const comma = url.href.indexOf(",");
+-    const head = comma === -1 ? url.href : url.href.slice(0, comma);
+-    return { protocol: url.protocol, data_head: head };
++    if (comma === -1) {
++      return { protocol: url.protocol, data_head: INVALID_DATA_URL_HEAD };
++    }
++    const raw_head = url.href.slice(0, comma);
++    const data_head =
++      raw_head.length <= MAX_DATA_URL_DIAGNOSTIC_PREFIX
++        ? raw_head
++        : `${raw_head.slice(0, MAX_DATA_URL_DIAGNOSTIC_PREFIX)}…`;
++    return { protocol: url.protocol, data_head };
+   }
+   return { protocol: url.protocol, hostname: url.hostname };
+ }
+
+exec
+/usr/bin/bash -lc "sed -n '1,320p' src/backend/network/system-proxy-http-client.test.ts; printf '\\n--- backend network docs refs ---\\n'; rg -n -C 3 \"代理|proxy|stderr|data:|网络|network\" docs/BACKEND.md docs/ARCHITECTURE.md docs/FRONTEND.md 2>/dev/null | head -240; printf '\\n--- relevant config ---\\n'; cat buildtools/vitest/vitest.config.ts; printf '\\n--- file at current worktree ---\\n'; git diff -- src/backend/network/system-proxy-http-client.ts src/backend/network/repro-proxy-url-leak.test.ts; git status --short -- src/backend/network/system-proxy-http-client.ts src/backend/network/repro-proxy-url-leak.test.ts" in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 360ms:
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => {
+  const direct_dispatchers: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+  const proxy_dispatchers: Array<{ uri: string; close: ReturnType<typeof vi.fn> }> = [];
+  return {
+    direct_dispatchers,
+    proxy_dispatchers,
+    fetch: vi.fn(),
+  };
+});
+
+vi.mock("undici", () => {
+  /** 仅补齐生产模块运行时导入形状。 */
+  class Dispatcher {}
+  /** 记录直连池实例和释放行为。 */
+  class Agent {
+    public readonly close = vi.fn(async () => undefined);
+
+    public constructor() {
+      mocks.direct_dispatchers.push(this);
+    }
+  }
+  /** HTTP 与 SOCKS 测试共用同一可观察代理池 fake。 */
+  class ProxyAgent {
+    public readonly uri: string;
+    public readonly close = vi.fn(async () => undefined);
+
+    public constructor(uri: string) {
+      this.uri = uri;
+      mocks.proxy_dispatchers.push(this);
+    }
+  }
+  return {
+    Agent,
+    Dispatcher,
+    ProxyAgent,
+    Socks5ProxyAgent: ProxyAgent,
+    fetch: mocks.fetch,
+  };
+});
+
+import { SystemProxyHttpClient, parse_system_proxy_route } from "./system-proxy-http-client";
+
+beforeEach(() => {
+  mocks.fetch.mockReset().mockResolvedValue(new Response("ok"));
+  mocks.direct_dispatchers.length = 0;
+  mocks.proxy_dispatchers.length = 0;
+});
+
+describe("system proxy route", () => {
+  it.each([
+    ["DIRECT", { kind: "direct" }],
+    ["PROXY 127.0.0.1:7890", { kind: "proxy", uri: "http://127.0.0.1:7890/" }],
+    ["HTTPS proxy.example:443", { kind: "proxy", uri: "https://proxy.example/" }],
+    ["SOCKS5 localhost:1080", { kind: "socks5", uri: "socks5://localhost:1080" }],
+    ["SOCKS4 old:1080; DIRECT", { kind: "direct" }],
+  ])("解析 %s", (rules, expected) => {
+    expect(parse_system_proxy_route(rules)).toEqual(expected);
+  });
+
+  it("没有支持路由时拒绝静默直连", () => {
+    expect(() => parse_system_proxy_route("SOCKS4 old:1080")).toThrow(
+      "System proxy returned no supported route.",
+    );
+  });
+});
+
+describe("SystemProxyHttpClient", () => {
+  it("安装唯一线程 transport 并在释放时恢复原 fetch", async () => {
+    const original_fetch = globalThis.fetch;
+    const client = new SystemProxyHttpClient({ resolveProxy: vi.fn(async () => "DIRECT") });
+
+    client.install_as_global_fetch();
+    try {
+      expect(globalThis.fetch).toBe(client.fetch);
+      expect(() => client.install_as_global_fetch()).toThrow();
+    } finally {
+      await client.dispose();
+    }
+    expect(globalThis.fetch).toBe(original_fetch);
+  });
+
+  it("每次请求按实际 URL 重新解析代理并禁止自动重定向", async () => {
+    const resolve_proxy = vi
+      .fn()
+      .mockResolvedValueOnce("PROXY 127.0.0.1:7890")
+      .mockResolvedValueOnce("PROXY 127.0.0.1:7891");
+    const client = new SystemProxyHttpClient({ resolveProxy: resolve_proxy });
+
+    await client.fetch("https://api.example/v1/models", { method: "GET" });
+    await client.fetch("https://api.example/v1/chat", { method: "POST" });
+
+    expect(resolve_proxy.mock.calls.map(([url]) => url)).toEqual([
+      "https://api.example/v1/models",
+      "https://api.example/v1/chat",
+    ]);
+    expect(mocks.fetch.mock.calls.map(([, init]) => init)).toEqual([
+      expect.objectContaining({ dispatcher: mocks.proxy_dispatchers[0], redirect: "error" }),
+      expect.objectContaining({ dispatcher: mocks.proxy_dispatchers[1], redirect: "error" }),
+    ]);
+  });
+
+  it("loopback 明确直连且不查询系统代理", async () => {
+    const resolve_proxy = vi.fn(async () => "PROXY 127.0.0.1:7890");
+    const client = new SystemProxyHttpClient({ resolveProxy: resolve_proxy });
+
+    await client.fetch("http://127.0.0.1:8080/v1/chat");
+
+    expect(resolve_proxy).not.toHaveBeenCalled();
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8080/v1/chat",
+      expect.objectContaining({ dispatcher: mocks.direct_dispatchers[0] }),
+    );
+  });
+
+  it("代理解析失败不会发起直连请求", async () => {
+    const failure = new Error("resolve failed");
+    const client = new SystemProxyHttpClient({
+      resolveProxy: vi.fn(async () => {
+        throw failure;
+      }),
+    });
+
+    await expect(client.fetch("https://api.example/v1")).rejects.toBe(failure);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("data: URL 在本线程内直接解码为 ArrayBuffer，供 harper.js wasm glue 的 `instanceof Response` 判定在 `instantiate` 分支正常执行", async () => {
+    const client = new SystemProxyHttpClient({ resolveProxy: vi.fn(async () => "DIRECT") });
+    client.install_as_global_fetch();
+    try {
+      // data: URL 走独立解码路径，不经 undici，直接用本线程 Response 构造器包装。
+      const result = await client.fetch("data:text/plain;base64,SGVsbG8=");
+      expect(result).toBeInstanceOf(Response);
+      expect(result.headers.get("content-type")).toBe("text/plain");
+      expect(await result.text()).toBe("Hello");
+      // 第二次调用仍然正确解码。
+      const result2 = await client.fetch("data:text/html;base64,PGgxPkhpPC9oMT4=");
+      expect(result2.headers.get("content-type")).toBe("text/html");
+      expect(await result2.text()).toBe("<h1>Hi</h1>");
+    } finally {
+      await client.dispose();
+    }
+  });
+
+  it("线程原 fetch（http(s) 路径下 undici 池）返回跨 realm Response 时，本类构造的 Response 也需 `instanceof Response` 通过", async () => {
+    // http(s) 路径直接调 undici_fetch，跳过本类 rewrap；测试目标是验证
+    // undici fetch 出来的 Response 在本线程 `instanceof Response` 上不会被误判。
+    // 真正跨 realm 的 rewrap 路径（仅对非 http(s) 协议，例如 blob:、file:）覆盖在 data: 测试之外：
+    // 这里只断言同 realm Response 的 no-op 行为，跨 realm Response 的场景在 Electron 里
+    // 走 undici fetch，由 Node 自身保证 Response 同源，本类不拦截。
+    const client = new SystemProxyHttpClient({ resolveProxy: vi.fn(async () => "DIRECT") });
+    client.install_as_global_fetch();
+    try {
+      // 同 realm Response 时本类直接返回原对象（http(s) 路径下完全 no-op）：
+      const same_realm = new Response("ok");
+      mocks.fetch.mockResolvedValueOnce(same_realm as unknown as Response);
+      const no_rewrap = await client.fetch("https://example.com/wasm.wasm");
+      expect(no_rewrap).toBe(same_realm);
+      expect(no_rewrap instanceof Response).toBe(true);
+      expect(await no_rewrap.text()).toBe("ok");
+    } finally {
+      await client.dispose();
+    }
+  });
+
+  it("释放所有自有直连和代理连接池", async () => {
+    const client = new SystemProxyHttpClient({
+      resolveProxy: vi.fn(async (url) =>
+        url.endsWith("/a") ? "PROXY 127.0.0.1:7890" : "SOCKS5 127.0.0.1:1080",
+      ),
+    });
+    await client.fetch("https://api.example/a");
+    await client.fetch("https://api.example/b");
+
+    await client.dispose();
+
+    expect(mocks.proxy_dispatchers.map(({ close }) => close.mock.calls.length)).toEqual([1, 1]);
+    expect(mocks.direct_dispatchers[0]?.close).toHaveBeenCalledOnce();
+    await expect(client.fetch("https://api.example/c")).rejects.toThrow("disposed");
+  });
+});
+
+--- backend network docs refs ---
+docs/FRONTEND.md-9-- 主进程按 Chromium 编辑语义为主窗口和日志窗口提供原生文本菜单；renderer 不新增菜单 IPC 或页面私有实现。
+docs/FRONTEND.md-10-- Agent Markdown 直接渲染原始 HTML 与图片；链接点击统一交给宿主外部打开，URL 语义由 Markdown 渲染链和宿主处理。
+docs/FRONTEND.md-11-- 后端传输统一收口到 `src/frontend/app/desktop/desktop-api.ts`；页面和跨页面 feature 可以直接调用其 `api_fetch`，也可以在各自所有权目录建立领域适配器，但不直接创建后端 `fetch` 或 `EventSource`。
+docs/FRONTEND.md:12:- Electron main 只在 Backend Runtime ready 后创建窗口并注入本次运行的 API base URL；`desktop-api.ts` 直接使用该地址处理响应壳、SSE、本地网络错误、renderer 诊断、日志详情和 GitHub release 元数据请求，`/api/health` 只读取版本元数据，不作为其它请求的前置门禁。renderer 的 release 请求与 Electron main 的 release zip 下载都复用默认 session 的 Chromium 网络栈并随其当前系统代理，loopback Backend API 保持直连。
+docs/FRONTEND.md-13-- Agent 工作区 runner 属于 Electron main 私有宿主能力，Backend Runtime 只通过可取消 host request 调用，不经过 preload、`window.desktopApp` 或产品 renderer；完整沙箱、文件协议与生命周期归 [`AGENT_RUNTIME.md`](AGENT_RUNTIME.md)。
+docs/FRONTEND.md:14:- `DesktopApiError` 是 API 与本地网络失败的统一错误，只承载 `code`、`details` 和可选 cause；用户可见文案键由稳定 `code` 推导并以 `details` 填参。页面只在确有恢复分支时按类型或 `code` 判断，不解析原始异常文本。
+docs/FRONTEND.md-15-- renderer 诊断只上报实际异常摘要与 route / project / task / event 白名单上下文，不上报完整 items / files、页面自定义对象或原始路径 / URL。
+docs/FRONTEND.md-16-- 日志列表只保存 `log.appended` 轻量事件，选中后由 `desktop-api.ts` 严格归一当前进程详情；普通页面、toast 和空状态不展示调用栈或原始异常。
+docs/FRONTEND.md-17-- 持久化 `AppLanguage` 只在 `src/domain/app-language.ts` 投影为 renderer `Locale`，React Provider 只消费已解析的 locale。
+--
+docs/ARCHITECTURE.md-17-
+docs/ARCHITECTURE.md-18-- `src/index.ts` 是唯一产品入口，只按显式 `--cli` 分发 GUI 或 CLI；入口适配器显式注入安装根、只读内置资产根、桌面 bundle 与 `BackendWorkerExecution`，Backend 和 worker 不从当前目录反推这些边界。`builtin` 随主应用打进 `app.asar`。
+docs/ARCHITECTURE.md-19-- GUI 的完整 Backend Runtime 运行在独立 `worker_thread`，其中拥有 `BackendBootstrap`、Gateway、服务、数据库、Agent、cache 与日志；Electron main 只拥有应用、窗口、IPC、shell 和更新器。renderer 仍通过本机 HTTP / SSE 消费 Gateway，不直接使用线程消息。
+docs/ARCHITECTURE.md:20:- GUI main 与 Backend Runtime 只交换 `src/shared/backend-runtime.ts` 定义的结构化控制协议：ready、stop、语言读取、宿主诊断，以及代理解析、打开输出目录和 Agent 工作区执行宿主回调。宿主操作以 requestId 隔离并发；worker 取消会中止 main 中对应操作，但已发出的工作区请求必须等待宿主完成清理，已提交成功或工作区失效结果继续交给状态拥有者，其余操作才以原始取消原因结算；runtime 关闭强制拒绝全部待处理请求。worker 意外退出直接结束应用，不回退同进程、不自动重启。
+docs/ARCHITECTURE.md-21-- CLI 仍在当前进程通过 `BackendBootstrap` 组装 `BackendServices`，关闭 Gateway 并直接消费类型化服务与任务快照订阅。
+docs/ARCHITECTURE.md-22-- GUI Backend Runtime 在发布态固定运行于独立 `worker_thread`；work-unit、planning 和 compute 的正式执行统一注入 `worker_threads`，三者的 `in_process` 只允许测试或源码运行显式选择，不作为失败回退。
+docs/ARCHITECTURE.md-23-- `BackendServices` 是 Gateway、CLI job 与任务引擎共用的组合根，运行期服务只在这里装配。
+docs/ARCHITECTURE.md:24:- `BackendBootstrap` 是进程资源生命周期权威：start / stop 串行，GUI、CLI 的正常退出与首个错误退出统一等待同一 stop；启动顺序固定为日志与迁移 → 普通 HTTP transport → `BackendServices` → 可选 Gateway，关闭时严格逆序，单项失败不跳过后续释放。transport 的网络语义归 [`BACKEND.md`](BACKEND.md)。
+docs/ARCHITECTURE.md-25-
+docs/ARCHITECTURE.md-26-```mermaid
+docs/ARCHITECTURE.md-27-flowchart LR
+--
+docs/BACKEND.md-62-- 快照派生写入在最终提交点完成 revision guard 与单 `.lg` 事务；当前事实 reset、任务 artifact 等写入不带预期 revision，但仍通过 `ProjectWriteStore` 更新事实和 section revision。
+docs/BACKEND.md-63-- settings-only alignment 只发布内部 committed event，不发布公开 project change；仅持久化任务 progress 的写入走 task snapshot 通道，不制造项目变更事件。
+docs/BACKEND.md-64-- 项目事实事务提交后才把类型化 committed event 交给唯一缓存 handler，缓存完成后再发布公开 change。后置缓存或公开事件同步失败不会回滚已提交事务，统一转换为带 `committed: true`、提交后 section revisions 和重新加载动作的 `data.committed_sync_failed`；调用方不得重试该写入。常规增量维护失败由 `CacheManager` 标记为可恢复，并在后续 query 前从数据库重建。
+docs/BACKEND.md:65:- HTTP `changes` 与 SSE 使用同一 canonical `ProjectChangeEvent`，消费者不得依赖两条通道的网络到达顺序。
+docs/BACKEND.md-66-- 公开事件绑定后端确认的 `projectPath`、`projectRevision`、`sectionRevisions` 与 `updatedSections`；payload mode 只允许 `canonical-delta`、`field-patch`、`section-invalidated`。
+docs/BACKEND.md-67-- 全量替换、排序或无法精确表达受影响行的写入使用 `section-invalidated`；只有能完整表达受影响行和删除 tombstone 的小范围变化才发布行级增量。
+docs/BACKEND.md-68-- Agent 磁盘工作区只是一次性只读快照和显式 change 准备区，不是 `.lg` 写入口。`AgentWorkspaceService` 以工程身份、epoch 与语言守卫快照边界，以对象指纹校验写入目标；普通 section revision 漂移不阻塞对象级 apply。
+--
+docs/BACKEND.md-78-- 每次成功 load / unload 都推进 `ProjectSessionState` 的内部会话世代；生命周期返回前，`TaskRuntime` 重置为新会话的 idle、推进 `run_revision` 并发布快照，因此旧工程迟到帧严格早于新工程事实。
+docs/BACKEND.md-79-- 生命周期和进度提交立即发布完整 `task.snapshot_changed`；只有请求压力允许合并，终态前必须冲刷。请求压力只表示已租约发出的 LLM 请求，不表示队列或 worker 数量。
+docs/BACKEND.md-80-- `TaskRuntime` 拥有任务取消、终态和 Engine completion，并以当前 active run 派生 task snapshot 的 `busy`。`TaskEngine` 只负责编排，任务结果统一经 `TaskProjectStore` 进入项目写入边界。全量翻译与分析经过 Planner，行级重翻直接从目标 items 构造 context。
+docs/BACKEND.md:81:- work-unit worker 负责提示词构建、runner、pipeline 和响应处理，但不持有供应商网络客户端；模型请求通过类型化 worker 消息回到父线程唯一的 `LLMClient`，取消仍使用原 work unit 的 signal。planning worker 只承担规划期计算。线程数不等于 LLM 并发，实际并发由模型 key lease 与 limiter 决定。
+docs/BACKEND.md-82-- 翻译 work-unit 以 item 为唯一请求、响应和提交单位：普通模型每个请求 item 使用一条 JSONL 记录（`index`、`text`，actor 模式再加 `actor`），`text` 可包含换行；SakuraLLM 每个 work-unit 只发送一个 item，并以完整纯文本承载译文。worker 内部才保留逐行准备与恢复事实。响应按 item index 独立裁决，唯一匹配的非空译文独立提交，缺失、重复、未知或空白正文只影响对应 item；请求失败、零有效译文、部分有效和全部有效分别形成 error、error、warning 和 info 结果日志，结构变化的译文保留模型完整文本并由校对实时派生 `LINE_COUNT_MISMATCH` warning。
+docs/BACKEND.md-83-- 翻译 work unit 在 pre-pipeline 前从原始 source fields 计算术语覆盖，再以全局开关和非空 `dst` 裁出 Prompt 激活条目；PromptBuilder 只格式化已激活条目，不根据预处理或模型输入文本再次匹配。
+docs/BACKEND.md-84-- 非 engine 的重型计算通过 `ComputeWorkerClient` 提交无状态 compute task；worker 不读数据库、不写 `.lg`、不发布事件、不持有项目 cache。
+docs/BACKEND.md-85-- 模型请求快照、统一模型能力解析、`api_format` 协议策略、最终请求覆盖、结果归一和模型列表探测归 `src/backend/llm`；OneShot、Agent、模型管理快照与模型选择快照共用同一能力结果和 `pi-ai` adapter，模型列表探测仍直接调用供应商 REST API。持久化 `Model` 只记录用户配置，不持有由模型 ID 推导的第二套容量或思考事实。
+docs/BACKEND.md-86-- 模型能力优先采用项目内少量精确修正，否则读取 Pi 内置 catalog，两者均未命中时不猜测思考能力并使用 Agent 安全容量。配置 ID 优先精确匹配；变种 ID 只在字母数字分隔边界内取最长且唯一的 canonical ID。思考能力使用与当前协议适配的单一模板；容量聚合同 canonical ID 在全部 Pi catalog 中的记录并分别取最大 `contextWindow` 与 `maxTokens`，不改写真实请求 ID、归一后的 API URL 或请求头。应用修正只承载 Pi 缺失或落后的当前事实，Pi 更新并验证后直接删除对应修正。
+docs/BACKEND.md-87-- `LLMClient` 独立拥有 OneShot 的总时限、取消和请求终态：供应商错误、长度截断和工具调用成为当前请求错误，正常终止的正文原样交给消费方按任务协议校验，空正文因此属于零有效任务数据；成功 usage 归一为输入、思考与输出三个互斥口径并分别进入任务快照。
+docs/BACKEND.md:88:- 除 [`AGENT_RUNTIME.md`](AGENT_RUNTIME.md) 定义的 Agent 公网 URL 安全抓取外，`src/backend/network` 是普通后端远端 HTTP 的唯一传输所有者；`BackendBootstrap` 在服务启动前把它安装为当前 Backend Runtime worker 或 CLI 进程的 `globalThis.fetch`，模型 adapter、模型列表和 Web Search 不再各自传递 transport。每次请求按当前 Electron session 代理规则选路，loopback 固定直连；解析失败、路由不受支持或代理失败都结束请求，不绕过代理静默直连，也不改写进程全局 dispatcher。
+docs/BACKEND.md-89-- OpenAI Chat Completions 与 Responses 是显式独立的 `api_format`，不按 URL 或模型名自动探测，也不互相重试或降级；模型配置归一化时统一把失效思考档位调整为当前模型可用值并在配置写入口持久化，模型快照不会向消费方暴露失效档位，请求阶段只保留 `off` 兜底。两种协议的原生思考载荷与 Responses 连续性由 `pi-ai` 生成，项目只补协议生成字段、把 Responses 系统指令规范为 `developer`，并让显式 `extra_body` 最终覆盖。
+docs/BACKEND.md-90-
+docs/BACKEND.md-91-## 5. 数据库与 `.lg` 存储
+
+--- relevant config ---
+import { defineConfig, defineProject } from "vitest/config";
+import { frontend_resolve_alias } from "../vite/project-paths.ts";
+
+// B1 split: two projects under test.projects, one per environment, so backend
+// test files that import node:sqlite / node:fs / node:os bundle correctly
+// instead of hitting the happy-dom client optimizer's "Cannot bundle Node.js
+// built-in" error.
+//
+// Ponytail note: the project list is intentionally explicit. A future test
+// path that doesn't match either include list will be silently skipped — add
+// the path here when adding new test directories.
+export default defineConfig({
+  resolve: {
+    alias: frontend_resolve_alias,
+  },
+  test: {
+    projects: [
+      // Browser project — happy-dom, client optimizer on, covers frontend tests
+      // and any non-backend test that needs DOM globals.
+      defineProject({
+        resolve: {
+          alias: frontend_resolve_alias,
+        },
+        test: {
+          name: "browser",
+          environment: "happy-dom",
+          setupFiles: ["./src/test/setup.ts"],
+          include: [
+            "src/frontend/**/*.test.ts",
+            "src/frontend/**/*.test.tsx",
+            "src/shared/**/*.test.ts",
+            "src/domain/**/*.test.ts",
+            "src/gui/**/*.test.ts",
+            "buildtools/**/*.test.mjs",
+          ],
+          exclude: ["**/node_modules/**", "**/build/**", "**/dist/**", "**/dist-electron/**"],
+          clearMocks: true,
+          deps: {
+            optimizer: {
+              client: {
+                enabled: true,
+                include: [
+                  "@codemirror/commands",
+                  "@codemirror/lang-json",
+                  "@codemirror/lang-markdown",
+                  "@codemirror/language",
+                  "@codemirror/state",
+                  "@codemirror/view",
+                  "@dnd-kit/core",
+                  "@dnd-kit/sortable",
+                  "@dnd-kit/utilities",
+                  "@tanstack/react-virtual",
+                  "lucide-react",
+                  "next-themes",
+                  "@base-ui/react",
+                  "react-dom",
+                  "react",
+                  "sonner",
+                ],
+              },
+            },
+          },
+        },
+      }),
+
+      // Node project — node env, no client optimizer, covers backend tests
+      // that import node built-ins (sqlite, fs, os, path, child_process, etc.).
+      defineProject({
+        resolve: {
+          alias: frontend_resolve_alias,
+        },
+        test: {
+          name: "node",
+          environment: "node",
+          setupFiles: ["./src/test/setup.ts"],
+          include: [
+            "src/backend/**/*.test.ts",
+            "src/cli/**/*.test.ts",
+            "src/native/**/*.test.ts",
+            "src/index.test.ts",
+          ],
+          exclude: ["**/node_modules/**", "**/build/**", "**/dist/**", "**/dist-electron/**"],
+          clearMocks: true,
+        },
+      }),
+    ],
+  },
+});
+
+--- file at current worktree ---
+
+exec
+/usr/bin/bash -lc "git branch -a --contains dcd21a0; git log --all --format='%H %s' --grep='spelling activity re-render loop fix' -i; git show --no-patch --pretty=raw dcd21a0; git rev-parse dcd21a0"'^ dcd21a0' in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 357ms:
+* main

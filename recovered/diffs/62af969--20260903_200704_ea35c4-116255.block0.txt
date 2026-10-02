@@ -1,0 +1,4 @@
+commit 62af9697f5251a0af64dd70dcaeb99980be010d7
+Author: mortang2410 <mortang2410@totally.mail>
+Date:   Thu Sep 3 01:06:25 2026 +0700
+62af969 feat(quality): 校对标点保留与拼写检查警告

@@ -1,0 +1,476 @@
+commit dcd21a00625f4172a3e1705dd9ccd1e3ca521c88
+Author:     mortang2410 <mortang2410@totally.mail>
+AuthorDate: Sat Sep 5 01:34:32 2026 +0700
+Commit:     mortang2410 <mortang2410@totally.mail>
+CommitDate: Sat Sep 5 01:34:32 2026 +0700
+
+    fix(backend): keep data: URL diagnostic under 256-char bound incl. ellipsis
+    
+    Codex review caught that the prior P2 fix produced 257 chars
+    (sliced 256 + ellipsis) when the meta prefix exceeded 256. The
+    marker now comes from inside the 256-char budget, so the final
+    data_head is always <= 256 chars.
+--- parent..commit diff ---
+diff --git a/src/backend/network/repro-proxy-url-leak.test.ts b/src/backend/network/repro-proxy-url-leak.test.ts
+index 5bd15e3..445e1cc 100644
+--- a/src/backend/network/repro-proxy-url-leak.test.ts
++++ b/src/backend/network/repro-proxy-url-leak.test.ts
+@@ -80,4 +80,27 @@ describe("proxy diagnostics redacts request URLs", () => {
+     // base64 payload must NOT be in stderr.
+     expect(text).not.toContain("iVBORw0KGgo");
+   });
++
++  it("data: URL: long meta prefix is bounded at 256 chars including ellipsis marker", async () => {
++    // 复现 P2 复发：长 meta 段不能让 data_head 超过 256 字符上限。
++    // 旧版用 `${raw_head.slice(0, 256)}…` 会得到 257 字符（截断 256 + 省略号 1）。
++    // 修复：marker 占位必须从 256 预算里扣掉，保证截断后总长严格 ≤ 256。
++    const long_mime = "x".repeat(2000);
++    const data_url = `data:${long_mime};base64,AAA`;
++    const client = new SystemProxyHttpClient(LOOPBACK_RESOLVER);
++    client.install_as_global_fetch();
++    try {
++      await client.fetch(data_url).catch(() => undefined);
++    } finally {
++      await client.dispose();
++    }
++    const text = stderr.fullText();
++    const data_head_match = text.match(/"data_head":"((?:[^"\\]|\\.)*)"/);
++    expect(data_head_match).not.toBeNull();
++    const data_head = JSON.parse(`"${data_head_match![1]}"`) as string;
++    // 总长严格不超过 256 字符（含省略号）。
++    expect(data_head.length).toBeLessThanOrEqual(256);
++    // 省略号必须出现。
++    expect(data_head.endsWith("…")).toBe(true);
++  });
+ });
+diff --git a/src/backend/network/system-proxy-http-client.ts b/src/backend/network/system-proxy-http-client.ts
+index e3794d2..0e9a66a 100644
+--- a/src/backend/network/system-proxy-http-client.ts
++++ b/src/backend/network/system-proxy-http-client.ts
+@@ -237,10 +237,15 @@ function url_diagnostic(url: URL): Record<string, unknown> {
+       return { protocol: url.protocol, data_head: INVALID_DATA_URL_HEAD };
+     }
+     const raw_head = url.href.slice(0, comma);
+-    const data_head =
+-      raw_head.length <= MAX_DATA_URL_DIAGNOSTIC_PREFIX
+-        ? raw_head
+-        : `${raw_head.slice(0, MAX_DATA_URL_DIAGNOSTIC_PREFIX)}…`;
++    let data_head: string;
++    if (raw_head.length <= MAX_DATA_URL_DIAGNOSTIC_PREFIX) {
++      data_head = raw_head;
++    } else {
++      // 留出 1 字符给省略号，保证截断后总长严格不超过 MAX_DATA_URL_DIAGNOSTIC_PREFIX。
++      const TRUNCATION_MARKER = "…";
++      const keep = MAX_DATA_URL_DIAGNOSTIC_PREFIX - TRUNCATION_MARKER.length;
++      data_head = `${raw_head.slice(0, keep)}${TRUNCATION_MARKER}`;
++    }
+     return { protocol: url.protocol, data_head };
+   }
+   return { protocol: url.protocol, hostname: url.hostname };
+--- numbered files at commit ---
+     1	import { Agent, Dispatcher, ProxyAgent, Socks5ProxyAgent, fetch as undici_fetch } from "undici";
+     2	
+     3	export interface SystemProxyResolver {
+     4	  resolveProxy: (url: string, signal?: AbortSignal) => Promise<string>; // Electron session 是系统代理规则的唯一来源
+     5	}
+     6	
+     7	export type SystemProxyRoute =
+     8	  | { kind: "direct" }
+     9	  | { kind: "proxy"; uri: string }
+    10	  | { kind: "socks5"; uri: string };
+    11	
+    12	/** fetch 路由诊断输出仅写 stderr，不影响请求行为。 */
+    13	function proxy_fetch_log(stage: string, detail: Record<string, unknown>): void {
+    14	  try {
+    15	    process.stderr.write(`[proxy-fetch] ${stage} ${JSON.stringify(detail)}\n`);
+    16	  } catch {
+    17	    // 诊断通道与 stderr 同时不可用时没有剩余安全出口，代理行为不受影响。
+    18	  }
+    19	}
+    20	
+    21	/** 解码 data: URL 为字节；仅处理 base64，否则让上游处理。 */
+    22	function decode_data_url_to_bytes(href: string): ArrayBuffer {
+    23	  const comma = href.indexOf(",");
+    24	  if (comma === -1) throw new Error("Invalid data URL.");
+    25	  const meta = href.slice(5, comma); // "data:<mime>;base64"
+    26	  if (!meta.endsWith(";base64")) throw new Error("Only base64 data URLs are decoded.");
+    27	  const payload = href.slice(comma + 1);
+    28	  const buffer = Buffer.from(payload, "base64");
+    29	  // 拷贝到独立 ArrayBuffer，Buffer 池化的内存可能被回收
+    30	  const out = new ArrayBuffer(buffer.byteLength);
+    31	  new Uint8Array(out).set(buffer);
+    32	  return out;
+    33	}
+    34	
+    35	/** 读取 data URL 的 MIME；缺省走 text/plain;charset=US-ASCII 与 RFC 2397 一致。 */
+    36	function read_data_url_mime(href: string): string {
+    37	  const comma = href.indexOf(",");
+    38	  if (comma === -1) return "text/plain;charset=US-ASCII";
+    39	  const meta = href.slice(5, comma); // "data:<mime>" 或 "data:<mime>;base64"
+    40	  const semi = meta.indexOf(";");
+    41	  const mime = (semi === -1 ? meta : meta.slice(0, semi)).trim();
+    42	  return mime === "" ? "text/plain;charset=US-ASCII" : mime;
+    43	}
+    44	
+    45	/**
+    46	 * 当前线程唯一的普通远端 HTTP Client；每次请求重新解析路由，只缓存可复用的代理连接池。
+    47	 */
+    48	export class SystemProxyHttpClient {
+    49	  private readonly resolver: SystemProxyResolver; // 请求时读取 Electron 当前路由，不保存启动快照
+    50	  private readonly direct_dispatcher: Dispatcher; // loopback 与显式 DIRECT 共用的自有连接池
+    51	  private readonly proxy_dispatchers = new Map<string, Dispatcher>(); // 同一路由复用连接池
+    52	  private previous_fetch: typeof globalThis.fetch | null = null; // 安装期保存线程原 transport，关闭时恢复
+    53	  /** 安装期保存线程原 Response 构造器，用来把跨 realm 的 Response 重新包成本本。 */
+    54	  private previous_response_ctor: typeof Response | null = null;
+    55	  private disposed = false; // 释放后拒绝新请求，避免重建已关闭资源
+    56	
+    57	  /** 创建自有直连池；代理池延迟到首次命中对应路由时创建。 */
+    58	  public constructor(resolver: SystemProxyResolver) {
+    59	    this.resolver = resolver;
+    60	    this.direct_dispatcher = new Agent();
+    61	  }
+    62	
+    63	  /** 把跨 realm 的 Response（undici / Node 原生 fetch）重新包成本线程 Response，使
+    64	   * 消费方 `instanceof Response` 检查通过。data: URL 在 Electron worker 里
+    65	   * 是 harper.js 唯一会触发的非 http(s) 协议，跨 realm Response 类差异会
+    66	   * 导致 wasm 加载路径进入 `WebAssembly.instantiate(<Response>, imports)`
+    67	   * 而撞 "Argument 0 must be a buffer source"。 */
+    68	  private async rewrap_response_to_local_realm(r: Response): Promise<Response> {
+    69	    if (this.previous_response_ctor === null) return r;
+    70	    if (r instanceof this.previous_response_ctor) return r;
+    71	    const source = r as unknown as Response; // unknown realm Response: widen type for property access
+    72	    proxy_fetch_log("fetch.rewrap_response", {
+    73	      ctor_name: source?.constructor?.name ?? "unknown",
+    74	      status: source.status,
+    75	    });
+    76	    const body = await source.arrayBuffer();
+    77	    // 用源 Headers 构造新 Headers 实例，避免 Node 24 Response 构造器在传入 Body 时
+    78	    // 自动补 Content-Type 覆盖源 headers 的语义。
+    79	    const headers = new Headers();
+    80	    for (const [name, value] of source.headers.entries()) headers.append(name, value);
+    81	    return new this.previous_response_ctor(body, {
+    82	      status: source.status,
+    83	      statusText: source.statusText,
+    84	      headers,
+    85	    });
+    86	  }
+    87	
+    88	  /** 普通远端 HTTP 共用此 Fetch；专用安全下载链路仍显式选择自己的 dispatcher。
+    89	   * 非 http(s) 协议（data:、blob:、file:）委托给安装期保存的线程原 fetch：
+    90	   * undici 的 Response 与线程原 Response 类不互通（`instanceof Response` 跨类失败），
+    91	   * 消费方拿到的 Response 会落到 `WebAssembly.instantiate(<Response>, imports)`
+    92	   * 撞 "Argument 0 must be a buffer source"。本类只接管真正走代理的远程 HTTP。 */
+    93	  public readonly fetch: typeof globalThis.fetch = async (input, init) => {
+    94	    if (this.disposed) {
+    95	      throw new Error("System proxy HTTP client is disposed.");
+    96	    }
+    97	    const url = read_request_url(input);
+    98	    proxy_fetch_log("fetch.entered", url_diagnostic(url));
+    99	    if (url.protocol !== "http:" && url.protocol !== "https:") {
+   100	      // data: URL 在 Electron worker_thread 里撞 harper.js wasm glue 的
+   101	      // `instanceof Response` 跨模块判定歧义：glue 闭包里的 Response 与本线程
+   102	      // 的 Response 是不同的标识符，即使 `instanceof` 同源也会让 harper.js
+   103	      // 退到 `WebAssembly.instantiate(<Response>, imports)` 分支而抛
+   104	      // "Argument 0 must be a buffer source"。
+   105	      //
+   106	      // 选项 B：harper.js 的 getInitInput 已直接解码 data: URL 为 Uint8Array
+   107	      // 并交给 WebAssembly.instantiate，这条 Response 路径不再被 wasm-bindgen
+   108	      // 触达；保留 data: 提前返回 Response 是为了让非 wasm 的调用方
+   109	      // （如测试）拿到带正确 Content-Type 的 Response。
+   110	      if (url.protocol === "data:") {
+   111	        const bytes = decode_data_url_to_bytes(url.href);
+   112	        const mime = read_data_url_mime(url.href);
+   113	        return new this.previous_response_ctor!(bytes, {
+   114	          status: 200,
+   115	          statusText: "OK",
+   116	          headers: new Headers({ "Content-Type": mime }),
+   117	        });
+   118	      }
+   119	      proxy_fetch_log("fetch.delegate_previous", url_diagnostic(url));
+   120	      if (this.previous_fetch === null) {
+   121	        throw new Error(`System proxy HTTP client has no previous fetch for ${url.protocol}.`);
+   122	      }
+   123	      const upstream = await this.previous_fetch(
+   124	        input as Parameters<typeof globalThis.fetch>[0],
+   125	        init,
+   126	      );
+   127	      return await this.rewrap_response_to_local_realm(upstream);
+   128	    }
+   129	    const signal = init?.signal ?? undefined;
+   130	    const dispatcher = is_loopback_hostname(url.hostname)
+   131	      ? this.direct_dispatcher
+   132	      : this.resolve_dispatcher(
+   133	          parse_system_proxy_route(await this.resolver.resolveProxy(url.href, signal)),
+   134	        );
+   135	    proxy_fetch_log("fetch.dispatch_undici", {
+   136	      protocol: url.protocol,
+   137	      hostname: url.hostname,
+   138	      loopback: is_loopback_hostname(url.hostname),
+   139	    });
+   140	    return (await undici_fetch(input as Parameters<typeof undici_fetch>[0], {
+   141	      ...(init as Parameters<typeof undici_fetch>[1]),
+   142	      dispatcher,
+   143	      redirect: "error",
+   144	    })) as unknown as Response;
+   145	  };
+   146	
+   147	  /** Backend 线程只有一个普通 HTTP transport，第三方 SDK 也从同一全局入口取用。 */
+   148	  public install_as_global_fetch(): void {
+   149	    if (this.disposed || this.previous_fetch !== null) {
+   150	      throw new Error("System proxy HTTP client cannot be installed in its current state.");
+   151	    }
+   152	    this.previous_fetch = globalThis.fetch;
+   153	    // 捕获安装期线程原 Response 构造器，供 data: URL 跨 realm Response 重新包装用。
+   154	    this.previous_response_ctor = globalThis.Response;
+   155	    globalThis.fetch = this.fetch;
+   156	  }
+   157	
+   158	  /** 先恢复线程原 transport，再关闭本 Client 创建的全部连接池。 */
+   159	  public async dispose(): Promise<void> {
+   160	    if (this.disposed) return;
+   161	    this.disposed = true;
+   162	    if (this.previous_fetch !== null) {
+   163	      globalThis.fetch = this.previous_fetch;
+   164	      this.previous_fetch = null;
+   165	    }
+   166	    this.previous_response_ctor = null;
+   167	    const dispatchers = [this.direct_dispatcher, ...this.proxy_dispatchers.values()];
+   168	    this.proxy_dispatchers.clear();
+   169	    const results = await Promise.allSettled(dispatchers.map((dispatcher) => dispatcher.close()));
+   170	    const errors = results
+   171	      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+   172	      .map((result) => result.reason);
+   173	    if (errors.length > 0) {
+   174	      throw new AggregateError(errors, "System proxy HTTP client failed to close.");
+   175	    }
+   176	  }
+   177	
+   178	  /** 按已解析路由返回直连池，或复用对应协议与地址的代理池。 */
+   179	  private resolve_dispatcher(route: SystemProxyRoute): Dispatcher {
+   180	    if (route.kind === "direct") return this.direct_dispatcher;
+   181	    const key = `${route.kind}:${route.uri}`;
+   182	    const existing = this.proxy_dispatchers.get(key);
+   183	    if (existing !== undefined) return existing;
+   184	    const dispatcher =
+   185	      route.kind === "socks5" ? new Socks5ProxyAgent(route.uri) : new ProxyAgent(route.uri);
+   186	    this.proxy_dispatchers.set(key, dispatcher);
+   187	    return dispatcher;
+   188	  }
+   189	}
+   190	
+   191	/** 按 Chromium 返回顺序选择首个可执行路由；只有显式 DIRECT 才允许直连。 */
+   192	export function parse_system_proxy_route(proxy_rules: string): SystemProxyRoute {
+   193	  for (const rule of proxy_rules.split(";")) {
+   194	    const trimmed_rule = rule.trim();
+   195	    if (trimmed_rule === "") continue;
+   196	    const [raw_type = "", ...target_parts] = trimmed_rule.split(/\s+/u);
+   197	    const type = raw_type.toUpperCase();
+   198	    if (type === "DIRECT") return { kind: "direct" };
+   199	    const target = target_parts.join(" ");
+   200	    if (type === "PROXY") {
+   201	      const uri = build_proxy_uri("http", target);
+   202	      if (uri !== null) return { kind: "proxy", uri };
+   203	    }
+   204	    if (type === "HTTPS") {
+   205	      const uri = build_proxy_uri("https", target);
+   206	      if (uri !== null) return { kind: "proxy", uri };
+   207	    }
+   208	    if (type === "SOCKS" || type === "SOCKS5") {
+   209	      const uri = build_proxy_uri("socks5", target);
+   210	      if (uri !== null) return { kind: "socks5", uri };
+   211	    }
+   212	  }
+   213	  throw new Error("System proxy returned no supported route.");
+   214	}
+   215	
+   216	/** fetch 同时接受 URL 文本、URL 和 Request，这里统一为代理解析所需的 URL。 */
+   217	function read_request_url(input: Parameters<typeof globalThis.fetch>[0]): URL {
+   218	  if (typeof input === "string" || input instanceof URL) return new URL(input);
+   219	  return new URL(input.url);
+   220	}
+   221	
+   222	/**
+   223	 * 拼装代理诊断输出，避免把查询字符串与 userinfo 写进 stderr：
+   224	 * 自定义模型端点常用 query 携带 API key 与签名，data: URL 的 base64 payload
+   225	 * 也可能携带内容。诊断需要的只是路由信息（协议 + 主机），其他字段省略。
+   226	 * data: URL 的 meta 段（mimetype 与可选 ;base64 等）按
+   227	 * MAX_DATA_URL_DIAGNOSTIC_PREFIX 截断，避免用户控制的长 meta
+   228	 * 把任意字节塞进 stderr；无逗号的非法 data URL 不暴露原文。
+   229	 */
+   230	const MAX_DATA_URL_DIAGNOSTIC_PREFIX = 256;
+   231	const INVALID_DATA_URL_HEAD = "<invalid>";
+   232	
+   233	function url_diagnostic(url: URL): Record<string, unknown> {
+   234	  if (url.protocol === "data:") {
+   235	    const comma = url.href.indexOf(",");
+   236	    if (comma === -1) {
+   237	      return { protocol: url.protocol, data_head: INVALID_DATA_URL_HEAD };
+   238	    }
+   239	    const raw_head = url.href.slice(0, comma);
+   240	    let data_head: string;
+   241	    if (raw_head.length <= MAX_DATA_URL_DIAGNOSTIC_PREFIX) {
+   242	      data_head = raw_head;
+   243	    } else {
+   244	      // 留出 1 字符给省略号，保证截断后总长严格不超过 MAX_DATA_URL_DIAGNOSTIC_PREFIX。
+   245	      const TRUNCATION_MARKER = "…";
+   246	      const keep = MAX_DATA_URL_DIAGNOSTIC_PREFIX - TRUNCATION_MARKER.length;
+   247	      data_head = `${raw_head.slice(0, keep)}${TRUNCATION_MARKER}`;
+   248	    }
+   249	    return { protocol: url.protocol, data_head };
+   250	  }
+   251	  return { protocol: url.protocol, hostname: url.hostname };
+   252	}
+   253	
+   254	/** Chromium 代理目标通常省略 scheme；无效目标留给后续候选继续匹配。 */
+   255	function build_proxy_uri(protocol: "http" | "https" | "socks5", target: string): string | null {
+   256	  const trimmed_target = target.trim();
+   257	  if (trimmed_target === "") return null;
+   258	  try {
+   259	    const url = new URL(
+   260	      trimmed_target.includes("://") ? trimmed_target : `${protocol}://${trimmed_target}`,
+   261	    );
+   262	    return url.hostname === "" ? null : url.toString();
+   263	  } catch {
+   264	    return null;
+   265	  }
+   266	}
+   267	
+   268	/** 本机模型端点不经过外部代理，覆盖 localhost、IPv6 loopback 与完整 127/8。 */
+   269	function is_loopback_hostname(hostname: string): boolean {
+   270	  const normalized = hostname.toLowerCase();
+   271	  return (
+   272	    normalized === "localhost" ||
+   273	    normalized === "[::1]" ||
+   274	    normalized === "::1" ||
+   275	    normalized.startsWith("127.")
+   276	  );
+   277	}
+--- test numbered ---
+     1	// @vitest-environment node
+     2	import { afterEach, beforeEach, describe, expect, it } from "vitest";
+     3	
+     4	import { SystemProxyHttpClient } from "./system-proxy-http-client";
+     5	
+     6	class CapturingStderr {
+     7	  private original: typeof process.stderr.write;
+     8	  public captured: string[] = [];
+     9	  public constructor() {
+    10	    this.original = process.stderr.write.bind(process.stderr);
+    11	  }
+    12	  public start(): void {
+    13	    process.stderr.write = ((chunk: string | Uint8Array) => {
+    14	      const text =
+    15	        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+    16	      this.captured.push(text);
+    17	      return true;
+    18	    }) as typeof process.stderr.write;
+    19	  }
+    20	  public stop(): void {
+    21	    process.stderr.write = this.original;
+    22	  }
+    23	  public fullText(): string {
+    24	    return this.captured.join("");
+    25	  }
+    26	}
+    27	
+    28	const LOOPBACK_RESOLVER = {
+    29	  async resolveProxy(): Promise<string> {
+    30	    return "DIRECT";
+    31	  },
+    32	};
+    33	
+    34	describe("proxy diagnostics redacts request URLs", () => {
+    35	  let stderr: CapturingStderr;
+    36	
+    37	  beforeEach(() => {
+    38	    stderr = new CapturingStderr();
+    39	    stderr.start();
+    40	  });
+    41	
+    42	  afterEach(() => {
+    43	    stderr.stop();
+    44	  });
+    45	
+    46	  it("HTTPS URL: query-string credentials do not appear in stderr", async () => {
+    47	    const client = new SystemProxyHttpClient(LOOPBACK_RESOLVER);
+    48	    client.install_as_global_fetch();
+    49	    try {
+    50	      await client
+    51	        .fetch(
+    52	          "https://api.example.com/v1/models?api_key=«redacted:sk-…»&sig=deadbeef",
+    53	        )
+    54	        .catch(() => undefined);
+    55	    } finally {
+    56	      await client.dispose();
+    57	    }
+    58	    const text = stderr.fullText();
+    59	    // Hostname is safe to log for routing diagnosis.
+    60	    expect(text).toContain("api.example.com");
+    61	    // The signed query string must not appear at all.
+    62	    expect(text).not.toContain("api_key=");
+    63	    expect(text).not.toContain("«redacted:sk-…»");
+    64	    expect(text).not.toContain("sig=deadbeef");
+    65	  });
+    66	
+    67	  it("data: URL: payload is stripped; only the mime prefix is logged", async () => {
+    68	    const client = new SystemProxyHttpClient(LOOPBACK_RESOLVER);
+    69	    client.install_as_global_fetch();
+    70	    try {
+    71	      await client
+    72	        .fetch("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==")
+    73	        .catch(() => undefined);
+    74	    } finally {
+    75	      await client.dispose();
+    76	    }
+    77	    const text = stderr.fullText();
+    78	    expect(text).toContain("data:");
+    79	    expect(text).toContain("image/png");
+    80	    // base64 payload must NOT be in stderr.
+    81	    expect(text).not.toContain("iVBORw0KGgo");
+    82	  });
+    83	
+    84	  it("data: URL: long meta prefix is bounded at 256 chars including ellipsis marker", async () => {
+    85	    // 复现 P2 复发：长 meta 段不能让 data_head 超过 256 字符上限。
+    86	    // 旧版用 `${raw_head.slice(0, 256)}…` 会得到 257 字符（截断 256 + 省略号 1）。
+    87	    // 修复：marker 占位必须从 256 预算里扣掉，保证截断后总长严格 ≤ 256。
+    88	    const long_mime = "x".repeat(2000);
+    89	    const data_url = `data:${long_mime};base64,AAA`;
+    90	    const client = new SystemProxyHttpClient(LOOPBACK_RESOLVER);
+    91	    client.install_as_global_fetch();
+    92	    try {
+    93	      await client.fetch(data_url).catch(() => undefined);
+    94	    } finally {
+    95	      await client.dispose();
+    96	    }
+    97	    const text = stderr.fullText();
+    98	    const data_head_match = text.match(/"data_head":"((?:[^"\\]|\\.)*)"/);
+    99	    expect(data_head_match).not.toBeNull();
+   100	    const data_head = JSON.parse(`"${data_head_match![1]}"`) as string;
+   101	    // 总长严格不超过 256 字符（含省略号）。
+   102	    expect(data_head.length).toBeLessThanOrEqual(256);
+   103	    // 省略号必须出现。
+   104	    expect(data_head.endsWith("…")).toBe(true);
+   105	  });
+   106	});
+
+exec
+/usr/bin/bash -lc "printf '%s\\n' '--- prior commits ---'; git log --oneline --all -- src/backend/network/system-proxy-http-client.ts src/backend/network/repro-proxy-url-leak.test.ts | head -30; printf '%s\\n' '--- parent function ---'; git show dcd21a0"'^:src/backend/network/system-proxy-http-client.ts | nl -ba | sed -n '"'215,255p'; printf '%s\\n' '--- relevant package scripts ---'; node -e 'const p=require(\"./package.json\"); console.log(JSON.stringify({scripts:p.scripts},null,2))'; printf '%s\\n' '--- docs workflow ---'; sed -n '1,260p' docs/WORKFLOW.md 2>/dev/null || true; printf '%s\\n' '--- files under network ---'; find src/backend/network -maxdepth 2 -type f -print | sort" in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 397ms:
+--- prior commits ---
+dcd21a0 fix(backend): keep data: URL diagnostic under 256-char bound incl. ellipsis
+3f23c38 fix(backend): bound data: URL diagnostic output to 256-char max
+4928dc2 fix(harper): spelling-activity review fixes
+60eee47 feat(harper): pending indicator + batch-end refresh (REVIEW STAGING)
+feb96bd fix(agent): 修复信息流默认跟随与回到最新状态 #797
+--- parent function ---
+   215	
+   216	/** fetch 同时接受 URL 文本、URL 和 Request，这里统一为代理解析所需的 URL。 */
+   217	function read_request_url(input: Parameters<typeof globalThis.fetch>[0]): URL {
+   218	  if (typeof input === "string" || input instanceof URL) return new URL(input);
+   219	  return new URL(input.url);
+   220	}
+   221	
+   222	/**
+   223	 * 拼装代理诊断输出，避免把查询字符串与 userinfo 写进 stderr：
+   224	 * 自定义模型端点常用 query 携带 API key 与签名，data: URL 的 base64 payload
+   225	 * 也可能携带内容。诊断需要的只是路由信息（协议 + 主机），其他字段省略。

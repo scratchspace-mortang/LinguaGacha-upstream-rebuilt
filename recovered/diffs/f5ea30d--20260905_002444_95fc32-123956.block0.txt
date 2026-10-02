@@ -1,0 +1,15 @@
+commit f5ea30db2ece208b60f8a28a4773c07f3109158a
+Author: mortang2410 <mortang2410@totally.mail>
+Date:   Sat Sep 5 01:15:13 2026 +0700
+
+    fix(harper): prevent re-render loop on identical spelling activity snapshots
+    
+    Previously, applySpellingActivitySnapshot always created a new snapshot
+    object even when the incoming snapshot had the same revision and identical
+    pending/active values as the current one.  useSyncExternalStore detects this
+    as a state change (reference inequality) and schedules a re-render, which
+    can cascade into an infinite render loop under certain conditions (e.g.
+    when a falling-edge refresh races with an SSE re-emission of the same
+    snapshot).
+    
+    The fix adds a structural-equality guard (revision + pending + active) that

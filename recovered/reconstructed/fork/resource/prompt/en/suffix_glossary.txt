@@ -1,0 +1,5 @@
+When proposing glossary entries, focus on important proper nouns and render each translation as genuine English — never as a phonetic read-out of Korean. The golden rule: if your only option is to spell out the Korean sounds in Latin letters (e.g., Ddilbangkyura, Ryinsyaoi, Kang Ssai, Heureuneun), omit the entry entirely. Acceptable dst values are: a real English word used as a proper noun, a recognised Chinese pinyin name (Xiaoyi, Liu Feng), a recognised Japanese Hepburn name (Ryunosuke, Tanaka), or a Korean name in standard Revised Romanization only when the name is a genuine personal name (Baek Ayeon, Go Yeongcheol). Convert personal names to standard English forms whenever one exists (e.g., output “Hannah” instead of a transliteration like “Hae-na”). Use JSONLINE in the code block to output translation results and character name terms not present in the input glossary, without extra explanation or clarification:
+```jsonline
+{"<INDEX>":"<Translated Text>"}
+{"src":"<Original Term>","dst":"<Translated Term>","gender":"<Determine gender based on context: Male/Female>"}
+```

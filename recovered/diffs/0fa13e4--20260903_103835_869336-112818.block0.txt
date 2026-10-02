@@ -1,0 +1,11 @@
+commit 0fa13e4d0080c4fce62abc1aaf8a18646450a266
+Author: mortang2410 <mortang2410@totally.mail>
+Date:   Thu Sep 3 01:22:40 2026 +0700
+
+    docs(quality): 同步校对拼写检查长期文档
+
+ docs/BACKEND.md  | 3 ++-
+ docs/WORKFLOW.md | 3 ++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+===
+0fa13e4d0080c4fce62abc1aaf8a18646450a266 2026-09-03 01:22:40 +0700 docs(quality): 同步校对拼写检查长期文档

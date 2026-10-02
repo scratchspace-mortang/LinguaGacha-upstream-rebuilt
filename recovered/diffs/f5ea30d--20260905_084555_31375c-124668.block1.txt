@@ -1,0 +1,74 @@
+commit f5ea30db2ece208b60f8a28a4773c07f3109158a
+Author: mortang2410 <mortang2410@totally.mail>
+Date:   Sat Sep 5 01:15:13 2026 +0700
+
+    fix(harper): prevent re-render loop on identical spelling activity snapshots
+    
+    Previously, applySpellingActivitySnapshot always created a new snapshot
+    object even when the incoming snapshot had the same revision and identical
+    pending/active values as the current one.  useSyncExternalStore detects this
+    as a state change (reference inequality) and schedules a re-render, which
+    can cascade into an infinite render loop under certain conditions (e.g.
+    when a falling-edge refresh races with an SSE re-emission of the same
+    snapshot).
+    
+    The fix adds a structural-equality guard (revision + pending + active) that
+    skips re-assignment when the incoming snapshot is identical to the current
+    one, preventing the new-reference trigger.
+    
+    Also adds applySpellingActivitySnapshot to the mock DesktopEventStreamOptions
+    in desktop-event-stream.test.tsx and the DesktopStateStores stub in
+    use-desktop-state.test.tsx so both test files type-check cleanly.
+    
+    Addresses: Maximum update depth exceeded errors during spelling activity
+    state transitions when a batch ends or a spellcheck is re-run.
+
+diff --git a/src/frontend/app/state/spelling-activity-store.ts b/src/frontend/app/state/spelling-activity-store.ts
+index 455efa8..a768b95 100644
+--- a/src/frontend/app/state/spelling-activity-store.ts
++++ b/src/frontend/app/state/spelling-activity-store.ts
+@@ -31,9 +31,7 @@ export function normalize_spelling_activity_snapshot(
+         ? revision
+         : 0,
+     pending:
+-      typeof pending === "number" && Number.isSafeInteger(pending) && pending >= 0
+-        ? pending
+-        : 0,
++      typeof pending === "number" && Number.isSafeInteger(pending) && pending >= 0 ? pending : 0,
+     active: active === true,
+   };
+ }
+@@ -55,12 +53,22 @@ export function createSpellingActivityStore(): {
+       listeners.add(listener);
+       return () => listeners.delete(listener);
+     },
+-    // 相同 revision 允许后到的完整快照覆盖，语义与 task store 一致。
++    // 完整快照来自 HTTP / spelling.activity_changed，乱序由 revision 守卫、
++    // 同 revision 的重复载荷（subscribe 即时回调 + SSE 重发等场景）由结构等价守卫：
++    // 旧版只挡 < revision 会在 revision 相等时每次都赋新对象，让 useSyncExternalStore
++    // 误判为变化触发 forceStoreRerender，叠加上游 falling-edge refresh 进入渲染循环。
+     applySnapshot(next_snapshot): void {
+       const normalized_snapshot = normalize_spelling_activity_snapshot({
+         spelling: next_snapshot,
+       });
+       if (normalized_snapshot.revision < snapshot.revision) return;
++      if (
++        normalized_snapshot.revision === snapshot.revision &&
++        normalized_snapshot.pending === snapshot.pending &&
++        normalized_snapshot.active === snapshot.active
++      ) {
++        return;
++      }
+       snapshot = normalized_snapshot;
+       for (const listener of listeners) listener();
+     },
+@@ -68,6 +76,8 @@ export function createSpellingActivityStore(): {
+ }
+ 
+ /** 拼写批处理是否在跑；批结束 falling-edge 用它触发整页 refresh。 */
+-export function is_spelling_batch_active(snapshot: Pick<SpellingActivitySnapshot, "active">): boolean {
++export function is_spelling_batch_active(
++  snapshot: Pick<SpellingActivitySnapshot, "active">,
++): boolean {
+   return snapshot.active;
+ }

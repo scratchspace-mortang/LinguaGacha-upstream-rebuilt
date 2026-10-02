@@ -1,0 +1,512 @@
+commit dcd21a0: spelling activity re-render loop fix - standards
+2026-09-04T18:55:58.446462Z ERROR codex_core::shell_snapshot: Shell snapshot validation failed: Snapshot command exited with status exit status: 2: /home/wilder/.codex/shell_snapshots/01a06dc7-1047-7f12-9566-ba11bb95b29b.tmp-1788548157521451628: line 750: syntax error near unexpected token `('
+
+exec
+/usr/bin/bash -lc "cat /home/wilder/.agents/skills/review/SKILL.md && printf '\\n--- root files ---\\n' && find .. -name AGENTS.md -o -name AGENTS.override.md -o -name CLAUDE.md -o -name .cursorrules -o -name CONTRIBUTING.md -o -name README.md | sort | head -200" in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 1219ms:
+---
+name: review
+description: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/PRD asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
+---
+
+# Review
+
+Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
+
+- **Standards** — does the code conform to this repo's documented coding standards?
+- **Spec** — does the code faithfully implement the originating issue / PRD / spec?
+
+Both axes run as **parallel sub-agents** so they don't pollute each other's context, then this skill aggregates their findings.
+
+The issue tracker should have been provided to you — run `/setup-matt-pocock-skills` if `docs/agents/issue-tracker.md` is missing.
+
+## Process
+
+### 1. Pin the fixed point
+
+Whatever the user said is the fixed point — a commit SHA, branch name, tag, `main`, `HEAD~5`, etc. Don't be opinionated; pass it through. If they didn't specify one, ask: "Review against what — a branch, a commit, or `main`?" Don't proceed until you have it.
+
+Capture the diff command once: `git diff <fixed-point>...HEAD` (three-dot, so the comparison is against the merge-base). Also note the list of commits via `git log <fixed-point>..HEAD --oneline`.
+
+### 2. Identify the spec source
+
+Look for the originating spec, in this order:
+
+1. Issue references in the commit messages (`#123`, `Closes #45`, GitLab `!67`, etc.) — fetch via the workflow in `docs/agents/issue-tracker.md`.
+2. A path the user passed as an argument.
+3. A PRD/spec file under `docs/`, `specs/`, or `.scratch/` matching the branch name or feature.
+4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** sub-agent will skip and report "no spec available".
+
+### 3. Identify the standards sources
+
+Anything in the repo that documents how code should be written. Common locations:
+
+- `CLAUDE.md`, `AGENTS.md`
+- `CONTRIBUTING.md`
+- `CONTEXT.md`, `CONTEXT-MAP.md`, per-context `CONTEXT.md` files
+- `docs/adr/` (architectural decisions are standards)
+- `.editorconfig`, `eslint.config.*`, `biome.json`, `prettier.config.*`, `tsconfig.json` (machine-enforced standards — note them but don't re-check what tooling already checks)
+- Any `STYLE.md`, `STANDARDS.md`, `STYLEGUIDE.md`, or similar at the repo root or under `docs/`
+
+Collect the list of files. The **Standards** sub-agent will read them.
+
+### 4. Spawn both sub-agents in parallel
+
+Send a single message with two `Agent` tool calls. Use the `general-purpose` subagent for both.
+
+**Standards sub-agent prompt** — include:
+
+- The full diff command and commit list.
+- The list of standards-source files you found in step 3.
+- The brief: "Read the standards docs. Then read the diff. Report — per file/hunk where relevant — every place the diff violates a documented standard. Cite the standard (file + the rule). Distinguish hard violations from judgement calls. Skip anything tooling enforces. Under 400 words."
+
+**Spec sub-agent prompt** — include:
+
+- The diff command and commit list.
+- The path or fetched contents of the spec.
+- The brief: "Read the spec. Then read the diff. Report: (a) requirements the spec asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. Under 400 words."
+
+If the spec is missing, skip the Spec sub-agent and note this in the final report.
+
+### 5. Aggregate
+
+Present the two reports under `## Standards` and `## Spec` headings, verbatim or lightly cleaned. Do **not** merge or rerank findings — the two axes are deliberately separate so the user can see them independently.
+
+End with a one-line summary: total findings per axis, and the worst single issue (if any) flagged.
+
+## Why two axes
+
+A change can pass one axis and fail the other:
+
+- Code that follows every standard but implements the wrong thing → **Standards pass, Spec fail.**
+- Code that does exactly what the issue asked but breaks the project's conventions → **Spec pass, Standards fail.**
+
+Reporting them separately stops one axis from masking the other.
+
+--- root files ---
+../LanguageTool/README.md
+../Layan-kde/README.md
+../Layan-kde/sddm/5.0/README.md
+../Layan-kde/sddm/6.0/README.md
+../LinguaGacha-upstream/AGENTS.md
+../LinguaGacha-upstream/CLAUDE.md
+../LinguaGacha-upstream/README.md
+../LinguaGacha-upstream/build/release/0.0.0/linux-unpacked/resources/app.asar.unpacked/node_modules/@earendil-works/pi-tui/native/darwin/README.md
+../LinguaGacha-upstream/build/release/0.0.0/linux-unpacked/resources/app.asar.unpacked/node_modules/@earendil-works/pi-tui/native/win32/README.md
+../LinguaGacha-upstream/docs/agent-notes/README.md
+../LinguaGacha-upstream/node_modules/@antfu/install-pkg/README.md
+../LinguaGacha-upstream/node_modules/@anthropic-ai/sdk/README.md
+../LinguaGacha-upstream/node_modules/@anthropic-ai/sdk/src/_vendor/partial-json-parser/README.md
+../LinguaGacha-upstream/node_modules/@anthropic-ai/sdk/src/core/README.md
+../LinguaGacha-upstream/node_modules/@anthropic-ai/sdk/src/internal/README.md
+../LinguaGacha-upstream/node_modules/@aws-crypto/sha256-browser/README.md
+../LinguaGacha-upstream/node_modules/@aws-crypto/sha256-js/README.md
+../LinguaGacha-upstream/node_modules/@aws-crypto/supports-web-crypto/README.md
+../LinguaGacha-upstream/node_modules/@aws-crypto/util/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/client-bedrock-runtime/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/core/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-env/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-http/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-http/node_modules/@smithy/node-http-handler/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-ini/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-login/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-node/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-process/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-sso/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-sso/node_modules/@aws-sdk/token-providers/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/credential-provider-web-identity/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/eventstream-handler-node/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/middleware-eventstream/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/middleware-websocket/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/nested-clients/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/nested-clients/node_modules/@smithy/node-http-handler/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/signature-v4-multi-region/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/token-providers/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/types/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/util-locate-window/README.md
+../LinguaGacha-upstream/node_modules/@aws-sdk/xml-builder/README.md
+../LinguaGacha-upstream/node_modules/@aws/lambda-invoke-store/README.md
+../LinguaGacha-upstream/node_modules/@babel/code-frame/README.md
+../LinguaGacha-upstream/node_modules/@babel/code-frame/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/compat-data/README.md
+../LinguaGacha-upstream/node_modules/@babel/core/README.md
+../LinguaGacha-upstream/node_modules/@babel/core/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/core/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/core/node_modules/@babel/parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/core/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/core/node_modules/semver/README.md
+../LinguaGacha-upstream/node_modules/@babel/generator/README.md
+../LinguaGacha-upstream/node_modules/@babel/generator/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/generator/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/generator/node_modules/@babel/parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/generator/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-annotate-as-pure/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-annotate-as-pure/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-annotate-as-pure/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-annotate-as-pure/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-compilation-targets/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-compilation-targets/node_modules/semver/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-create-class-features-plugin/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-create-class-features-plugin/node_modules/semver/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-globals/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-member-expression-to-functions/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-member-expression-to-functions/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-member-expression-to-functions/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-member-expression-to-functions/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-module-imports/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-module-imports/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-module-imports/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-module-imports/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-module-transforms/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-module-transforms/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-optimise-call-expression/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-optimise-call-expression/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-optimise-call-expression/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-optimise-call-expression/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-plugin-utils/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-replace-supers/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-skip-transparent-expression-wrappers/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-skip-transparent-expression-wrappers/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-skip-transparent-expression-wrappers/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-skip-transparent-expression-wrappers/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/helper-validator-option/README.md
+../LinguaGacha-upstream/node_modules/@babel/helpers/README.md
+../LinguaGacha-upstream/node_modules/@babel/helpers/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/helpers/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/helpers/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/plugin-syntax-jsx/README.md
+../LinguaGacha-upstream/node_modules/@babel/plugin-syntax-typescript/README.md
+../LinguaGacha-upstream/node_modules/@babel/plugin-transform-arrow-functions/README.md
+../LinguaGacha-upstream/node_modules/@babel/plugin-transform-modules-commonjs/README.md
+../LinguaGacha-upstream/node_modules/@babel/plugin-transform-typescript/README.md
+../LinguaGacha-upstream/node_modules/@babel/preset-typescript/README.md
+../LinguaGacha-upstream/node_modules/@babel/runtime/README.md
+../LinguaGacha-upstream/node_modules/@babel/template/README.md
+../LinguaGacha-upstream/node_modules/@babel/template/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/template/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/template/node_modules/@babel/parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/template/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/traverse/README.md
+../LinguaGacha-upstream/node_modules/@babel/traverse/node_modules/@babel/helper-string-parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/traverse/node_modules/@babel/helper-validator-identifier/README.md
+../LinguaGacha-upstream/node_modules/@babel/traverse/node_modules/@babel/parser/README.md
+../LinguaGacha-upstream/node_modules/@babel/traverse/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@babel/types/README.md
+../LinguaGacha-upstream/node_modules/@base-ui/react/README.md
+../LinguaGacha-upstream/node_modules/@base-ui/utils/README.md
+../LinguaGacha-upstream/node_modules/@braintree/sanitize-url/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/autocomplete/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/commands/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/lang-css/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/lang-html/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/lang-javascript/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/lang-json/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/lang-markdown/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/language/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/lint/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/state/README.md
+../LinguaGacha-upstream/node_modules/@codemirror/view/README.md
+../LinguaGacha-upstream/node_modules/@dnd-kit/accessibility/README.md
+../LinguaGacha-upstream/node_modules/@dnd-kit/core/README.md
+../LinguaGacha-upstream/node_modules/@dnd-kit/sortable/README.md
+../LinguaGacha-upstream/node_modules/@dnd-kit/utilities/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/node_modules/dotenv/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/node_modules/human-signals/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/node_modules/ignore/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/node_modules/isexe/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/node_modules/signal-exit/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/node_modules/undici/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/node_modules/undici/types/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/dotenvx/node_modules/which/README.md
+../LinguaGacha-upstream/node_modules/@dotenvx/primitives/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-agent-core/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-ai/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/examples/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/examples/extensions/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/examples/extensions/doom-overlay/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/examples/extensions/plan-mode/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/examples/extensions/subagent/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/examples/sdk/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@anthropic-ai/sdk/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@anthropic-ai/sdk/src/_vendor/partial-json-parser/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@anthropic-ai/sdk/src/core/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@anthropic-ai/sdk/src/internal/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-crypto/crc32/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-crypto/sha256-browser/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-crypto/sha256-js/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-crypto/supports-web-crypto/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-crypto/util/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/client-bedrock-runtime/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/core/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/credential-provider-env/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/credential-provider-http/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/credential-provider-ini/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/credential-provider-login/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/credential-provider-node/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/credential-provider-process/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/credential-provider-sso/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/credential-provider-web-identity/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/eventstream-handler-node/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/middleware-eventstream/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/middleware-websocket/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/nested-clients/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/signature-v4-multi-region/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/token-providers/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/types/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/util-locate-window/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/xml-builder/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws/lambda-invoke-store/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@babel/runtime/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-client/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-protocol/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-telemetry/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/native/darwin/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/native/win32/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@google/genai/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-darwin-arm64/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-darwin-universal/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-darwin-x64/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-linux-arm64-gnu/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-linux-riscv64-gnu/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-linux-x64-gnu/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-linux-x64-musl/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-win32-arm64-msvc/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-win32-x64-msvc/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@nodable/entities/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@protobufjs/aspromise/README.md
+../LinguaGacha-upstream/node_modules/@earendil-works/pi-coding-agent/node_modules/@protobufjs/base64/README.md
+sort: write failed: 'standard output': Broken pipe
+
+exec
+/usr/bin/bash -lc "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- head/log ---'; git log --oneline --decorate -12; printf '%s\\n' '--- commit ---'; git show --no-ext-diff --stat --oneline --decorate dcd21a0; printf '%s\\n' '--- root CLAUDE ---'; cat CLAUDE.md; printf '%s\\n' '--- scoped instruction files ---'; find . -path './node_modules' -prune -o -path './build' -prune -o \\( -name AGENTS.override.md -o -name AGENTS.md -o -name CLAUDE.md \\) -print | sort" in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 379ms:
+--- status ---
+ M AGENTS.md
+ M buildtools/check/gui-rules.test.mjs
+ M buildtools/vitest/vitest.config.ts
+ M builtin/agent/skill/agent-charter/SKILL.md
+ M builtin/agent/skill/glossary-rules/SKILL.md
+ M builtin/agent/skill/quality-rule-workflow/SKILL.md
+ M builtin/agent/skill/roleplay/SKILL.md
+ M builtin/agent/skill/text-preserve-rules/SKILL.md
+ M builtin/agent/skill/translation-rules/SKILL.md
+ M builtin/agent/skill/translation-workflow/SKILL.md
+ M builtin/agent/skill/writing-guide/SKILL.md
+ M builtin/agent/system_prompt.md
+ M docs/BACKEND.md
+ M docs/WORKFLOW.md
+ M docs/agent-notes/HANDOFF-proofreading-spelling-impl.md
+ M docs/agent-notes/README.md
+ M docs/agent-notes/proofreading-punctuation-spelling-spec.md
+ M package-lock.json
+ M src/backend/agent/agent-service.test.ts
+ M src/backend/agent/agent-workspace-contract.test.ts
+ M src/backend/agent/agent-workspace-contract.ts
+ M src/backend/agent/agent-workspace-service.test.ts
+ M src/backend/agent/agent-workspace-service.ts
+ M src/backend/bootstrap/backend-runtime-worker-entry.ts
+ M src/backend/bootstrap/backend-services.test.ts
+ M src/backend/cache/cache-manager.test.ts
+ M src/backend/cache/cache-manager.ts
+ M src/backend/cache/proofreading-cache.test.ts
+ M src/backend/cache/proofreading-cache.ts
+ M src/backend/engine/task-runtime.test.ts
+ M src/backend/engine/task-runtime.ts
+ M src/backend/engine/work-unit/pipeline/translation-post-pipeline.test.ts
+ M src/backend/engine/work-unit/pipeline/translation-post-pipeline.ts
+ M src/backend/engine/work-unit/work-unit-prompt-builder.ts
+ M src/backend/file/formats/epub/epub-writer.test.ts
+ M src/backend/file/formats/epub/epub-writer.ts
+ M src/backend/network/system-proxy-http-client.test.ts
+ M src/backend/project/project-data-reader.test.ts
+ M src/backend/project/project-data-reader.ts
+ M src/backend/project/project-write-store.test.ts
+ M src/backend/project/project-write-store.ts
+ D src/backend/proofreading/language-tool-client.test.ts
+ D src/backend/proofreading/language-tool-client.ts
+ M src/backend/proofreading/proofreading-query-service.ts
+ M src/backend/proofreading/proofreading-service.test.ts
+ M src/backend/proofreading/proofreading-service.ts
+ M src/backend/quality/quality-rule-analysis-glossary-import.test.ts
+ M src/backend/quality/quality-rule-analysis-glossary-import.ts
+ M src/backend/quality/quality-rule-service.test.ts
+ M src/backend/quality/quality-rule-service.ts
+ M src/domain/setting.test.ts
+ M src/domain/setting.ts
+ M src/frontend/app/app-shell-state.ts
+ M src/frontend/app/navigation/schema.ts
+ M src/frontend/app/navigation/screen-registry.ts
+ M src/frontend/app/navigation/types.ts
+ M src/frontend/app/session/workbench-tasks/use-analysis-workbench-task.test.tsx
+ M src/frontend/app/session/workbench-tasks/use-analysis-workbench-task.ts
+ M src/frontend/app/session/workbench-tasks/use-translation-workbench-task.ts
+ M src/frontend/app/session/workbench-tasks/workbench-tasks-session-context.test.tsx
+ M src/frontend/app/state/desktop-state-context.test.tsx
+ M src/frontend/features/proofreading/proofreading-label-keys.ts
+ M src/frontend/features/quality-rule-editor/quality-rule-api-client.ts
+ M src/frontend/pages/basic-settings-page/page.test.tsx
+ M src/frontend/pages/basic-settings-page/page.tsx
+ M src/frontend/pages/basic-settings-page/types.ts
+ M src/frontend/pages/basic-settings-page/use-basic-settings-state.ts
+ M src/frontend/pages/glossary-page/components/glossary-command-bar.tsx
+ M src/frontend/pages/glossary-page/page.tsx
+ M src/frontend/pages/glossary-page/use-glossary-page-state.test.ts
+ M src/frontend/pages/glossary-page/use-glossary-page-state.ts
+ M src/frontend/pages/proofreading-page/components/proofreading-confirm-dialog.tsx
+ M src/frontend/pages/proofreading-page/components/proofreading-edit-dialog.tsx
+ M src/frontend/pages/proofreading-page/components/proofreading-table.test.tsx
+ M src/frontend/pages/proofreading-page/components/proofreading-table.tsx
+ M src/frontend/pages/proofreading-page/proofreading-api-client.test.ts
+ M src/frontend/pages/proofreading-page/proofreading-api-client.ts
+ M src/frontend/pages/proofreading-page/proofreading-page-ui-types.ts
+ M src/frontend/pages/proofreading-page/use-proofreading-batch-actions.ts
+ M src/frontend/pages/workbench-page/components/workbench-command-bar.test.tsx
+ M src/frontend/pages/workbench-page/use-workbench-page-state.test.ts
+ M src/frontend/pages/workbench-page/use-workbench-page-state.ts
+ M src/gui/bridge/bridge-api.ts
+ M src/gui/bridge/bridge-types.ts
+ M src/gui/gui-entry.ts
+ M src/gui/preload/index.ts
+ M src/gui/runtime/backend-runtime-client.ts
+ M src/gui/shell/desktop-ipc-host.ts
+ M src/native/native-fs.ts
+ M src/native/native-path.ts
+ M src/shared/i18n/messages.ts
+ M src/shared/i18n/resources/de-DE/basic-settings-page.ts
+ M src/shared/i18n/resources/de-DE/glossary-page.ts
+ M src/shared/i18n/resources/de-DE/workbench-page.ts
+ M src/shared/i18n/resources/en-US/basic-settings-page.ts
+ M src/shared/i18n/resources/en-US/glossary-page.ts
+ M src/shared/i18n/resources/en-US/workbench-page.ts
+ M src/shared/i18n/resources/zh-CN/basic-settings-page.ts
+ M src/shared/i18n/resources/zh-CN/glossary-page.ts
+ M src/shared/i18n/resources/zh-CN/workbench-page.ts
+ M src/shared/proofreading/list.ts
+ M src/shared/proofreading/proofreading-evaluator.test.ts
+ M src/shared/proofreading/proofreading-evaluator.ts
+ M src/shared/proofreading/proofreading-reader.ts
+ M src/shared/proofreading/proofreading-types.ts
+ M src/shared/quality/glossary.test.ts
+ M src/shared/quality/glossary.ts
+ M src/shared/text/text-pattern.ts
+ M src/shared/text/text-replacement-rules.test.ts
+ M src/shared/text/text-replacement-rules.ts
+ M src/test/desktop-bridge-mock.ts
+?? .claude-second-opinion-prompt.txt
+?? .claude/
+?? .scratch/harper-spelling/
+?? .scratch/spelling-lt-server-lifecycle/
+?? CLAUDE.md
+?? CONTEXT.md
+?? buildtools/vite/electron.vite.config.d.ts
+?? buildtools/vite/electron.vite.config.js
+?? buildtools/vite/project-paths.d.ts
+?? buildtools/vite/project-paths.js
+?? builtin/analysis_prompt/preset/
+?? builtin/glossary/preset/10_korean_naming_conventions.json
+?? builtin/glossary/preset/11_japanese_naming_conventions.json
+?? builtin/glossary/preset/12_chinese_naming_conventions.json
+?? docs/HANDOFF-GLOSSARY-GRAFT.md
+?? docs/adr/
+?? src/backend/proofreading/engine-config-revision.test.ts
+?? src/backend/proofreading/engine-config-revision.ts
+?? src/backend/proofreading/harper-client.test.ts
+?? src/backend/proofreading/harper-client.ts
+?? src/backend/quality/spelling-whitelist-service.ts
+?? src/frontend/features/spelling-whitelist/
+?? src/frontend/pages/proofreading-page/use-proofreading-legacy-conversion.test.ts
+?? src/frontend/pages/proofreading-page/use-proofreading-legacy-conversion.ts
+?? src/frontend/pages/proofreading-page/use-proofreading-respellcheck-actions.ts
+?? src/frontend/pages/spelling-whitelist-page/
+?? src/shared/fixer/fullwidth-converter.test.ts
+?? src/shared/fixer/fullwidth-converter.ts
+?? src/shared/i18n/resources/de-DE/spelling-whitelist-page.ts
+?? src/shared/i18n/resources/en-US/spelling-whitelist-page.ts
+?? src/shared/i18n/resources/zh-CN/spelling-whitelist-page.ts
+?? src/shared/quality/glossary-gender-retranslate.test.ts
+?? src/shared/quality/glossary-gender-retranslate.ts
+?? src/shared/quality/glossary-maintenance.test.ts
+?? src/shared/quality/glossary-maintenance.ts
+?? src/shared/quality/pinyin-inventory.test.ts
+?? src/shared/quality/pinyin-inventory.ts
+?? src/shared/quality/romanization-gate.test.ts
+?? src/shared/quality/romanization-gate.ts
+--- head/log ---
+0016ea7 (HEAD -> main) docs(quality): 同步校对 handoff v19 — 拼写检查修复完成
+dcd21a0 fix(backend): keep data: URL diagnostic under 256-char bound incl. ellipsis
+3f23c38 fix(backend): bound data: URL diagnostic output to 256-char max
+f5ea30d fix(harper): prevent re-render loop on identical spelling activity snapshots
+4928dc2 fix(harper): spelling-activity review fixes
+60eee47 feat(harper): pending indicator + batch-end refresh (REVIEW STAGING)
+0fa13e4 (wt/harper-pending-indicator-review) docs(quality): 同步校对拼写检查长期文档
+62af969 feat(quality): 校对标点保留与拼写检查警告
+2e2d89a (origin/main, origin/HEAD) update README.md
+8accaa3 (tag: MANUAL_BUILD_v0.117.4) v0.117.4
+fd27ff6 refactor(runtime): 统一内置资源根与构建链路 #841
+5869773 refactor(file): 完全移除 PDF 翻译模块
+--- commit ---
+dcd21a0 fix(backend): keep data: URL diagnostic under 256-char bound incl. ellipsis
+ src/backend/network/repro-proxy-url-leak.test.ts | 23 +++++++++++++++++++++++
+ src/backend/network/system-proxy-http-client.ts  | 13 +++++++++----
+ 2 files changed, 32 insertions(+), 4 deletions(-)
+--- root CLAUDE ---
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **LinguaGacha** (11701 symbols, 35073 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/LinguaGacha/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/LinguaGacha/clusters` | All functional areas |
+| `gitnexus://repo/LinguaGacha/processes` | All execution flows |
+| `gitnexus://repo/LinguaGacha/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->--- scoped instruction files ---
+./AGENTS.md
+./CLAUDE.md
+
+exec
+/usr/bin/bash -lc "printf '%s\\n' '--- commit metadata ---'; git show -s --format=fuller dcd21a0; printf '%s\\n' '--- parent..commit diff ---'; git diff --no-ext-diff --find-renames --find-copies dcd21a0"'^ dcd21a0 -- src/backend/network/system-proxy-http-client.ts src/backend/network/repro-proxy-url-leak.test.ts; printf '"'%s\\n' '--- numbered files at commit ---'; git show dcd21a0:src/backend/network/system-proxy-http-client.ts | nl -ba | sed -n '1,280p'; printf '%s\\n' '--- test numbered ---'; git show dcd21a0:src/backend/network/repro-proxy-url-leak.test.ts | nl -ba | sed -n '1,300p'" in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 367ms:
+--- commit metadata ---

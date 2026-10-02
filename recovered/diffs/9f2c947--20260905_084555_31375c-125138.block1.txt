@@ -1,0 +1,61 @@
+commit 9f2c947a84e6cd1af0749e4e3de9230cbba1ab03
+Author: mortang2410 <mortang2410@totally.mail>
+Date:   Sat Sep 5 09:57:43 2026 +0700
+
+    fix(frontend): defer listener notify via setTimeout(0) to prevent React max-update-depth crash
+    
+    Coalesce rapid same-tick applySnapshot dispatches into one notification.
+    
+    The Re-spellcheck SSE path triggers multiple applySnapshot calls
+    synchronously in the same event-loop tick, which in React 19 can
+    overwhelm the nested-update guard even when the structural-equality
+    guard skips re-assignment — the listener list was still iterated per
+    call, flooding React's update counter.
+    
+    Fix: schedule listener-notify via setTimeout(0) so all synchronous
+    applySnapshot calls in the same tick share one notification pass.
+    
+    Fixes 'Maximum update depth exceeded' React error during Re-spellcheck
+    (cf. https://github.com/esengine/DeepSeek-Reasonix/issues/2123).
+    
+    Test: added batching contract test with vi.useFakeTimers;
+    updated existing test expectations to reflect coalesced notification.
+
+diff --git a/src/frontend/app/state/spelling-activity-store.ts b/src/frontend/app/state/spelling-activity-store.ts
+index a768b95..0bc6846 100644
+--- a/src/frontend/app/state/spelling-activity-store.ts
++++ b/src/frontend/app/state/spelling-activity-store.ts
+@@ -45,6 +45,24 @@ export function createSpellingActivityStore(): {
+   let snapshot = DEFAULT_SPELLING_ACTIVITY_SNAPSHOT;
+   const listeners = new Set<SpellingActivityListener>();
+ 
++  // Deferred-notify pattern: synchronously updating state then notifying listeners
++  // in the same tick causes React's useSyncExternalStore to fire forceStoreRerender
++  // for every dispatch.  When SSE/HTTP events arrive faster than React can render,
++  // the nested-update counter hits the 50-call limit and the app crashes with
++  // "Maximum update depth exceeded".  Deferring the notification via setTimeout(0)
++  // lets React's concurrent scheduler coalesce all dispatches in a tick into a
++  // single render.  https://github.com/esengine/DeepSeek-Reasonix/issues/2123
++  let notifyScheduled = false;
++
++  function notifyListeners(): void {
++    if (notifyScheduled) return;
++    notifyScheduled = true;
++    setTimeout(() => {
++      notifyScheduled = false;
++      for (const listener of listeners) listener();
++    }, 0);
++  }
++
+   return {
+     // useSyncExternalStore 读取同一对象引用，只有实际应用快照时才替换。
+     getSnapshot: () => snapshot,
+@@ -70,7 +88,7 @@ export function createSpellingActivityStore(): {
+         return;
+       }
+       snapshot = normalized_snapshot;
+-      for (const listener of listeners) listener();
++      notifyListeners();
+     },
+   };
+ }

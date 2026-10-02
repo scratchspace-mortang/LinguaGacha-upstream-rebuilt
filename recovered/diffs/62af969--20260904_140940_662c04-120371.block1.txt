@@ -1,0 +1,21 @@
+commit 62af9697f5251a0af64dd70dcaeb99980be010d7
+Author: mortang2410 <mortang2410@totally.mail>
+Date:   Thu Sep 3 01:06:25 2026 +0700
+
+    feat(quality): 校对标点保留与拼写检查警告
+
+ .scratch/proofreading-punctuation-spelling/spec.md | 266 +++++++++++++++++
+ builtin/translation_prompt/template/en/base.txt    |   1 +
+ builtin/translation_prompt/template/zh/base.txt    |   1 +
+ .../HANDOFF-proofreading-spelling-impl.md          | 152 ++++++++++
+ docs/agent-notes/README.md                         |  34 +++
+ docs/agent-notes/headless-cli-operations.md        |  42 +++
+ .../proofreading-punctuation-spelling-spec.md      | 322 +++++++++++++++++++++
+ .../reviewer-verification-log-2026-08-31.md        |  59 ++++
+ src/backend/agent/agent-workspace-contract.ts      |   2 +
+ src/backend/bootstrap/backend-services.ts          |   4 +
+ src/backend/cache/cache-manager.test.ts            |  56 ++++
+ src/backend/cache/cache-manager.ts                 |   8 +-
+ src/backend/cache/proofreading-cache.test.ts       | 221 +++++++++++++-
+ src/backend/cache/proofreading-cache.ts            | 178 +++++++++++-
+---

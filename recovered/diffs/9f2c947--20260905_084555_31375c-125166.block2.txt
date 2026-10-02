@@ -1,0 +1,576 @@
+commit 9f2c947a84e6cd1af0749e4e3de9230cbba1ab03
+Author:     mortang2410 <mortang2410@totally.mail>
+AuthorDate: Sat Sep 5 09:57:43 2026 +0700
+Commit:     mortang2410 <mortang2410@totally.mail>
+CommitDate: Sat Sep 5 09:57:43 2026 +0700
+
+    fix(frontend): defer listener notify via setTimeout(0) to prevent React max-update-depth crash
+    
+    Coalesce rapid same-tick applySnapshot dispatches into one notification.
+    
+    The Re-spellcheck SSE path triggers multiple applySnapshot calls
+    synchronously in the same event-loop tick, which in React 19 can
+    overwhelm the nested-update guard even when the structural-equality
+    guard skips re-assignment — the listener list was still iterated per
+    call, flooding React's update counter.
+    
+    Fix: schedule listener-notify via setTimeout(0) so all synchronous
+    applySnapshot calls in the same tick share one notification pass.
+    
+    Fixes 'Maximum update depth exceeded' React error during Re-spellcheck
+    (cf. https://github.com/esengine/DeepSeek-Reasonix/issues/2123).
+    
+    Test: added batching contract test with vi.useFakeTimers;
+    updated existing test expectations to reflect coalesced notification.
+
+ .../app/state/spelling-activity-store.test.ts      | 44 +++++++++++++++++++---
+ src/frontend/app/state/spelling-activity-store.ts  | 20 +++++++++-
+ 2 files changed, 57 insertions(+), 7 deletions(-)
+
+hook: PostToolUse
+hook: PostToolUse Completed
+hook: PostToolUse Completed
+hook: PreToolUse
+hook: PreToolUse
+hook: PreToolUse Completed
+hook: PreToolUse Completed
+exec
+/usr/bin/bash -lc 'git diff 9f2c947''^ 9f2c947 -- src/frontend/app/state/spelling-activity-store.ts' in /home/wilder/git-repos/LinguaGacha-upstream
+exec
+/usr/bin/bash -lc 'git diff 9f2c947''^ 9f2c947 -- src/frontend/app/state/spelling-activity-store.test.ts' in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 369ms:
+diff --git a/src/frontend/app/state/spelling-activity-store.ts b/src/frontend/app/state/spelling-activity-store.ts
+index a768b95..0bc6846 100644
+--- a/src/frontend/app/state/spelling-activity-store.ts
++++ b/src/frontend/app/state/spelling-activity-store.ts
+@@ -45,6 +45,24 @@ export function createSpellingActivityStore(): {
+   let snapshot = DEFAULT_SPELLING_ACTIVITY_SNAPSHOT;
+   const listeners = new Set<SpellingActivityListener>();
+ 
++  // Deferred-notify pattern: synchronously updating state then notifying listeners
++  // in the same tick causes React's useSyncExternalStore to fire forceStoreRerender
++  // for every dispatch.  When SSE/HTTP events arrive faster than React can render,
++  // the nested-update counter hits the 50-call limit and the app crashes with
++  // "Maximum update depth exceeded".  Deferring the notification via setTimeout(0)
++  // lets React's concurrent scheduler coalesce all dispatches in a tick into a
++  // single render.  https://github.com/esengine/DeepSeek-Reasonix/issues/2123
++  let notifyScheduled = false;
++
++  function notifyListeners(): void {
++    if (notifyScheduled) return;
++    notifyScheduled = true;
++    setTimeout(() => {
++      notifyScheduled = false;
++      for (const listener of listeners) listener();
++    }, 0);
++  }
++
+   return {
+     // useSyncExternalStore 读取同一对象引用，只有实际应用快照时才替换。
+     getSnapshot: () => snapshot,
+@@ -70,7 +88,7 @@ export function createSpellingActivityStore(): {
+         return;
+       }
+       snapshot = normalized_snapshot;
+-      for (const listener of listeners) listener();
++      notifyListeners();
+     },
+   };
+ }
+
+hook: PostToolUse
+ succeeded in 362ms:
+diff --git a/src/frontend/app/state/spelling-activity-store.test.ts b/src/frontend/app/state/spelling-activity-store.test.ts
+index f99d438..a745f18 100644
+--- a/src/frontend/app/state/spelling-activity-store.test.ts
++++ b/src/frontend/app/state/spelling-activity-store.test.ts
+@@ -1,4 +1,4 @@
+-import { describe, expect, it } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+ import {
+   createSpellingActivityStore,
+@@ -6,6 +6,13 @@ import {
+ } from "./spelling-activity-store";
+ 
+ describe("spelling activity store", () => {
++  beforeEach(() => {
++    vi.useFakeTimers({ shouldAdvanceTime: false });
++  });
++  afterEach(() => {
++    vi.useRealTimers();
++  });
++
+   it("default snapshot has zero pending and inactive", () => {
+     const store = createSpellingActivityStore();
+     expect(store.getSnapshot()).toEqual({ pending: 0, active: false, revision: 0 });
+@@ -28,9 +35,13 @@ describe("spelling activity store", () => {
+     });
+     store.applySnapshot({ pending: 5, active: true, revision: 1 });
+     store.applySnapshot({ pending: 4, active: true, revision: 2 });
++    // happy-dom fake timer: 同步 flush setTimeout(0) 队列。
++    // 同 tick 两次 apply 合并为一次通知（最终态 revision=2）。
++    vi.runAllTimers();
+     unsubscribe();
+     store.applySnapshot({ pending: 0, active: false, revision: 3 });
+-    expect(received).toEqual([1, 2]);
++    vi.runAllTimers();
++    expect(received).toEqual([2]);
+   });
+ 
+   it("normalizer 接受带 spelling 容器的 SSE 载荷", () => {
+@@ -60,11 +71,13 @@ describe("spelling activity store", () => {
+     expect(normalized).toEqual({ pending: 0, active: false, revision: 0 });
+   });
+ 
+-  it("同 revision + 同内容重复 applySnapshot 不通知订阅者", () => {
++  it("同 revision + 同内容重复 applySnapshot 不通知订阅者", async () => {
+     // 渲染循环复现：spell 批结束时的 falling-edge refresh 经 SSE 触发 applySnapshot，
+     // 若 revision 与 pending/active 都未变化，store 仍赋值新对象会让 useSyncExternalStore
+     // 误判为变化触发 forceStoreRerender。叠加上游 useEffect 反复跑就进入 React 的
+     // "Maximum update depth exceeded"。store 必须在等价重复载荷上静默。
++    // 另外，applySnapshot 用 setTimeout(0) 合并同 tick 多次 dispatches 成单次通知，
++    // 模拟 "批结束多事件同一 tick 全部到达" 的真实场景。
+     const store = createSpellingActivityStore();
+     const received: number[] = [];
+     store.subscribe(() => {
+@@ -73,12 +86,13 @@ describe("spelling activity store", () => {
+     store.applySnapshot({ pending: 5, active: true, revision: 1 });
+     store.applySnapshot({ pending: 5, active: true, revision: 1 });
+     store.applySnapshot({ pending: 5, active: true, revision: 1 });
++    await vi.runAllTimersAsync();
+     // 第一次 revision=1 通知一次，重复两次不通知。
+     expect(received).toEqual([1]);
+     expect(store.getSnapshot()).toEqual({ pending: 5, active: true, revision: 1 });
+   });
+ 
+-  it("同 revision 但 pending/active 变化仍会通知订阅者", () => {
++  it("同 revision 但 pending/active 变化仍会通知订阅者", async () => {
+     // 守护回归：等价守卫只挡重复载荷，新数据同 revision 也应能落入。
+     // 后端 revision 由 pending/active 任意变化推进，但若后端因 bug 重发旧 revision
+     // 附新数据，store 不应静默吞下。
+@@ -90,10 +104,28 @@ describe("spelling activity store", () => {
+     store.applySnapshot({ pending: 5, active: true, revision: 1 });
+     store.applySnapshot({ pending: 3, active: true, revision: 1 });
+     store.applySnapshot({ pending: 3, active: false, revision: 1 });
++    // 让所有 setTimeout(0) 通知触发，再读 received。
++    await vi.runAllTimersAsync();
+     expect(received).toEqual([
+-      { pending: 5, active: true, revision: 1 },
+-      { pending: 3, active: true, revision: 1 },
+       { pending: 3, active: false, revision: 1 },
+     ]);
+   });
++
++  it("同 tick 多次 applySnapshot 合并为一次订阅者通知", async () => {
++    // 真实场景：SSE 在同一 tick 连发多个快照。后端 revision 单调递增，
++    // 但前端不该为每个 dispatch 都强制 React 重新渲染。
++    const store = createSpellingActivityStore();
++    let calls = 0;
++    store.subscribe(() => {
++      calls += 1;
++    });
++    store.applySnapshot({ pending: 5, active: true, revision: 1 });
++    store.applySnapshot({ pending: 4, active: true, revision: 2 });
++    store.applySnapshot({ pending: 3, active: true, revision: 3 });
++    expect(calls).toBe(0);
++    await vi.runAllTimersAsync();
++    expect(calls).toBe(1);
++    // 最终态正确。
++    expect(store.getSnapshot()).toEqual({ pending: 3, active: true, revision: 3 });
++  });
+ });
+
+hook: PostToolUse
+hook: PostToolUse Completed
+hook: PostToolUse Completed
+hook: PreToolUse
+hook: PreToolUse
+hook: PreToolUse Completed
+hook: PreToolUse Completed
+exec
+/usr/bin/bash -lc "nl -ba src/frontend/app/state/desktop-event-stream.ts | sed -n '1,260p'" in /home/wilder/git-repos/LinguaGacha-upstream
+exec
+/usr/bin/bash -lc "rg -n \"applySnapshot\\(\" src/frontend/app -g '"'!**/dist/**'"'" in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 370ms:
+src/frontend/app/state/desktop-state-context.tsx:264:    task_snapshot_store_ref.current.applySnapshot(snapshot);
+src/frontend/app/state/desktop-state-context.tsx:268:    runtime_snapshot_store_ref.current.applySnapshot(snapshot);
+src/frontend/app/state/desktop-state-context.tsx:273:      spelling_activity_store_ref.current.applySnapshot(snapshot);
+src/frontend/app/state/desktop-state-context.tsx:542:      project_change_store_ref.current.applySnapshot({
+src/frontend/app/state/spelling-activity-store.test.ts:23:    store.applySnapshot({ pending: 3, active: true, revision: 2 });
+src/frontend/app/state/spelling-activity-store.test.ts:26:    store.applySnapshot({ pending: 1, active: true, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:36:    store.applySnapshot({ pending: 5, active: true, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:37:    store.applySnapshot({ pending: 4, active: true, revision: 2 });
+src/frontend/app/state/spelling-activity-store.test.ts:42:    store.applySnapshot({ pending: 0, active: false, revision: 3 });
+src/frontend/app/state/spelling-activity-store.test.ts:86:    store.applySnapshot({ pending: 5, active: true, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:87:    store.applySnapshot({ pending: 5, active: true, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:88:    store.applySnapshot({ pending: 5, active: true, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:104:    store.applySnapshot({ pending: 5, active: true, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:105:    store.applySnapshot({ pending: 3, active: true, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:106:    store.applySnapshot({ pending: 3, active: false, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:122:    store.applySnapshot({ pending: 5, active: true, revision: 1 });
+src/frontend/app/state/spelling-activity-store.test.ts:123:    store.applySnapshot({ pending: 4, active: true, revision: 2 });
+src/frontend/app/state/spelling-activity-store.test.ts:124:    store.applySnapshot({ pending: 3, active: true, revision: 3 });
+src/frontend/app/state/spelling-activity-store.ts:78:    applySnapshot(next_snapshot): void {
+src/frontend/app/state/task-snapshot-store.test.ts:33:    store.applySnapshot(create_task_snapshot(3, "done"));
+src/frontend/app/state/task-snapshot-store.test.ts:34:    store.applySnapshot(create_task_snapshot(2, "requested"));
+src/frontend/app/state/task-snapshot-store.test.ts:47:    store.applySnapshot(delayed_a_terminal);
+src/frontend/app/state/task-snapshot-store.test.ts:48:    store.applySnapshot(create_task_snapshot(8, "idle", 2));
+src/frontend/app/state/task-snapshot-store.test.ts:49:    store.applySnapshot(delayed_a_terminal);
+src/frontend/app/state/project-change-signal-store.test.ts:17:    store.applySnapshot(signal);
+src/frontend/app/state/project-change-signal-store.test.ts:22:    store.applySnapshot({ ...signal, seq: 2 });
+src/frontend/app/state/runtime-activity-store.ts:53:    applySnapshot(next_snapshot): void {
+src/frontend/app/state/runtime-activity-store.test.ts:26:    store.applySnapshot({ revision: 2, owner: "agent" });
+src/frontend/app/state/runtime-activity-store.test.ts:27:    store.applySnapshot({ revision: 1, owner: null });
+src/frontend/app/state/task-snapshot-store.ts:140:    applySnapshot(next_snapshot: TaskSnapshot): void {
+src/frontend/app/state/use-desktop-state.test.tsx:62:      stores.runtime.applySnapshot({ revision: 1, owner: "agent" });
+src/frontend/app/state/use-desktop-state.test.tsx:75:      stores.projectChange.applySnapshot({
+src/frontend/app/state/project-change-signal-store.ts:20:    applySnapshot(next_snapshot: ProjectChangeSignal): void {
+
+ succeeded in 373ms:
+     1	import { useEffect, type MutableRefObject } from "react";
+     2	
+     3	import { open_event_stream } from "@frontend/app/desktop/desktop-api";
+     4	import {
+     5	  DesktopRefreshScheduler,
+     6	  type DesktopRefreshSchedulerErrorContext,
+     7	} from "@frontend/app/state/desktop-refresh-scheduler";
+     8	import {
+     9	  summarize_project_change_payload_for_diagnostics,
+    10	  summarize_scheduler_error_context,
+    11	  summarize_task_snapshot_for_diagnostics,
+    12	} from "@frontend/app/state/desktop-diagnostics";
+    13	import type { DesktopRecoveryActions } from "@frontend/app/state/desktop-recovery";
+    14	import type {
+    15	  ProjectEventPipeline,
+    16	  ProjectChangeEventPayload,
+    17	} from "@frontend/app/state/project-event-pipeline";
+    18	import {
+    19	  normalize_task_snapshot,
+    20	  type TaskSnapshot,
+    21	} from "@frontend/app/state/task-snapshot-store";
+    22	import { normalize_runtime_activity_snapshot } from "@frontend/app/state/runtime-activity-store";
+    23	import { normalize_spelling_activity_snapshot } from "@frontend/app/state/spelling-activity-store";
+    24	import type { SettingsSnapshotPayload } from "@frontend/app/state/desktop-state-context";
+    25	import { record_renderer_diagnostics_event } from "@frontend/app/diagnostics/renderer-error-reporter";
+    26	import { parse_event_payload } from "@frontend/app/state/desktop-event-payload";
+    27	import { PROJECT_CHANGE_EVENT_TOPIC } from "@shared/project-event";
+    28	import {
+    29	  RUNTIME_ACTIVITY_EVENT_TOPIC,
+    30	  type RuntimeActivitySnapshot,
+    31	} from "@shared/runtime-activity";
+    32	import {
+    33	  SPELLING_ACTIVITY_EVENT_TOPIC,
+    34	  type SpellingActivitySnapshot,
+    35	} from "@shared/spelling-activity";
+    36	import { is_task_type } from "@domain/task";
+    37	
+    38	type SettingsChangedEventPayload = {
+    39	  keys?: unknown;
+    40	  settings?: SettingsSnapshotPayload["settings"];
+    41	};
+    42	
+    43	type DesktopEventStreamOptions = {
+    44	  schedulerRef: MutableRefObject<DesktopRefreshScheduler | null>;
+    45	  applySettingsSnapshot: (payload: SettingsSnapshotPayload) => void;
+    46	  applyTaskSnapshot: (snapshot: TaskSnapshot) => void;
+    47	  applyRuntimeSnapshot: (snapshot: RuntimeActivitySnapshot) => void;
+    48	  applySpellingActivitySnapshot: (snapshot: SpellingActivitySnapshot) => void;
+    49	  refreshSettings: () => Promise<unknown>;
+    50	  refreshRuntime: () => Promise<unknown>;
+    51	  refreshSpellingActivity: () => Promise<unknown>;
+    52	  projectEvents: ProjectEventPipeline;
+    53	  recovery: DesktopRecoveryActions;
+    54	};
+    55	
+    56	/**
+    57	 * Backend SSE 消费、调度器 flush 和异常恢复集中在事件流 hook，Provider 只负责注入 store 写入口。
+    58	 */
+    59	export function useDesktopEventStream(options: DesktopEventStreamOptions): void {
+    60	  const {
+    61	    schedulerRef,
+    62	    applySettingsSnapshot,
+    63	    applyTaskSnapshot,
+    64	    applyRuntimeSnapshot,
+    65	    applySpellingActivitySnapshot,
+    66	    refreshSettings,
+    67	    refreshRuntime,
+    68	    refreshSpellingActivity,
+    69	    projectEvents,
+    70	    recovery,
+    71	  } = options;
+    72	  const { report_state_error, refresh_project_state_after_error, refresh_task_after_state_error } =
+    73	    recovery;
+    74	
+    75	  useEffect(() => {
+    76	    let event_source: EventSource | null = null;
+    77	    let cancelled = false;
+    78	    const refresh_scheduler = new DesktopRefreshScheduler({
+    79	      applyTaskSnapshot: applyTaskSnapshot,
+    80	      applyProjectChangeBatch: projectEvents.applyProjectChangeBatch,
+    81	      shouldApplyProjectChange: projectEvents.shouldApplyProjectChange,
+    82	      onFlushError: (error, context) => {
+    83	        handle_scheduler_flush_error(error, context, {
+    84	          report_state_error,
+    85	          refresh_project_state_after_error,
+    86	          refresh_task_after_state_error,
+    87	        });
+    88	      },
+    89	    });
+    90	    schedulerRef.current = refresh_scheduler;
+    91	
+    92	    function handle_task_snapshot_changed(event: MessageEvent<string>): void {
+    93	      let payload: Record<string, unknown> = {};
+    94	      try {
+    95	        payload = parse_event_payload(event);
+    96	        const task_snapshot = normalize_task_snapshot(payload);
+    97	        // task 面包屑先于调度分支记录，保证崩溃发生在 enqueue/flush 之间时仍有最新进度。
+    98	        record_renderer_diagnostics_event({
+    99	          topic: "task.snapshot_changed",
+   100	          task: summarize_task_snapshot_for_diagnostics(task_snapshot),
+   101	        });
+   102	        if (should_apply_task_snapshot_immediately(task_snapshot)) {
+   103	          refresh_scheduler.flush();
+   104	          applyTaskSnapshot(task_snapshot);
+   105	          return;
+   106	        }
+   107	
+   108	        refresh_scheduler.enqueue_task_snapshot(task_snapshot);
+   109	      } catch (error) {
+   110	        report_state_error(error, {
+   111	          source: "sse",
+   112	          triggeringEvent: {
+   113	            topic: "task.snapshot_changed",
+   114	            task: payload,
+   115	          },
+   116	          context: { stage: "handle_task_snapshot_changed" },
+   117	        });
+   118	        void refresh_task_after_state_error("task_snapshot_event_failed", {
+   119	          topic: "task.snapshot_changed",
+   120	        });
+   121	      }
+   122	    }
+   123	
+   124	    function handle_settings_changed(event: MessageEvent<string>): void {
+   125	      let payload: SettingsChangedEventPayload = {};
+   126	      try {
+   127	        payload = parse_event_payload(event) as SettingsChangedEventPayload;
+   128	
+   129	        if (typeof payload.settings === "object" && payload.settings !== null) {
+   130	          applySettingsSnapshot({
+   131	            settings: payload.settings,
+   132	          });
+   133	        } else {
+   134	          void refreshSettings().catch((error: unknown) => {
+   135	            report_state_error(error, {
+   136	              source: "settings",
+   137	              triggeringEvent: { topic: "settings.changed" },
+   138	              context: { stage: "refresh_settings_after_event" },
+   139	            });
+   140	          });
+   141	        }
+   142	      } catch (error) {
+   143	        report_state_error(error, {
+   144	          source: "settings",
+   145	          triggeringEvent: { topic: "settings.changed", keys: payload.keys },
+   146	          context: { stage: "handle_settings_changed" },
+   147	        });
+   148	      }
+   149	    }
+   150	
+   151	    /** runtime 快照不参与合帧；锁定与解锁必须立即反映到所有页面。 */
+   152	    function handle_runtime_snapshot_changed(event: MessageEvent<string>): void {
+   153	      let payload: Record<string, unknown> = {};
+   154	      try {
+   155	        payload = parse_event_payload(event);
+   156	        applyRuntimeSnapshot(normalize_runtime_activity_snapshot(payload));
+   157	      } catch (error) {
+   158	        report_state_error(error, {
+   159	          source: "sse",
+   160	          triggeringEvent: { topic: RUNTIME_ACTIVITY_EVENT_TOPIC, runtime: payload },
+   161	          context: { stage: "handle_runtime_snapshot_changed" },
+   162	        });
+   163	        void refreshRuntime().catch((refresh_error: unknown) => {
+   164	          report_state_error(refresh_error, {
+   165	            source: "state-recovery",
+   166	            triggeringEvent: { topic: RUNTIME_ACTIVITY_EVENT_TOPIC },
+   167	            context: { stage: "refresh_runtime_after_event_failure" },
+   168	          });
+   169	        });
+   170	      }
+   171	    }
+   172	
+   173	    /** 拼写活动快照：批进度展示与批结束的 falling-edge refresh 由各自 hook 处理。 */
+   174	    function handle_spelling_activity_changed(event: MessageEvent<string>): void {
+   175	      let payload: Record<string, unknown> = {};
+   176	      try {
+   177	        payload = parse_event_payload(event);
+   178	        applySpellingActivitySnapshot(normalize_spelling_activity_snapshot(payload));
+   179	      } catch (error) {
+   180	        report_state_error(error, {
+   181	          source: "sse",
+   182	          triggeringEvent: { topic: SPELLING_ACTIVITY_EVENT_TOPIC, spelling: payload },
+   183	          context: { stage: "handle_spelling_activity_changed" },
+   184	        });
+   185	      }
+   186	    }
+   187	
+   188	    async function handle_project_data_changed(event: MessageEvent<string>): Promise<void> {
+   189	      let payload: ProjectChangeEventPayload = {};
+   190	      try {
+   191	        payload = parse_event_payload(event) as ProjectChangeEventPayload;
+   192	        await projectEvents.handleProjectDataChangedPayload({
+   193	          payload,
+   194	          scheduler: refresh_scheduler,
+   195	          isCancelled: () => cancelled,
+   196	        });
+   197	      } catch (error) {
+   198	        report_state_error(error, {
+   199	          source: "sse",
+   200	          triggeringEvent: {
+   201	            topic: PROJECT_CHANGE_EVENT_TOPIC,
+   202	            ...summarize_project_change_payload_for_diagnostics(payload),
+   203	          },
+   204	          context: { stage: "parse_project_data_changed" },
+   205	        });
+   206	        void refresh_project_state_after_error("project_data_changed_event_failed", {
+   207	          topic: PROJECT_CHANGE_EVENT_TOPIC,
+   208	        });
+   209	      }
+   210	    }
+   211	
+   212	    /** 重连可能跨过任意增量事件，各状态域统一回到自身权威读取入口。 */
+   213	    async function restore_state_after_reconnect(): Promise<void> {
+   214	      refresh_scheduler.flush();
+   215	      await Promise.all([
+   216	        refreshSettings().catch((error: unknown) => {
+   217	          report_state_error(error, {
+   218	            source: "state-recovery",
+   219	            context: { stage: "refresh_settings_after_reconnect" },
+   220	          });
+   221	        }),
+   222	        refreshRuntime().catch((error: unknown) => {
+   223	          report_state_error(error, {
+   224	            source: "state-recovery",
+   225	            context: { stage: "refresh_runtime_after_reconnect" },
+   226	          });
+   227	        }),
+   228	        refreshSpellingActivity().catch((error: unknown) => {
+   229	          report_state_error(error, {
+   230	            source: "state-recovery",
+   231	            context: { stage: "refresh_spelling_activity_after_reconnect" },
+   232	          });
+   233	        }),
+   234	        refresh_task_after_state_error("event_stream_reconnected", {
+   235	          topic: "task.snapshot_changed",
+   236	        }),
+   237	        refresh_project_state_after_error("event_stream_reconnected", {
+   238	          topic: PROJECT_CHANGE_EVENT_TOPIC,
+   239	        }),
+   240	      ]);
+   241	    }
+   242	
+   243	    function attach_event_stream(): void {
+   244	      try {
+   245	        const next_event_source = open_event_stream();
+   246	        event_source = next_event_source;
+   247	        let opened_once = false; // 首次 open 由初始快照负责，后续 open 才代表需要恢复的重连
+   248	        next_event_source.onopen = () => {
+   249	          if (cancelled) {
+   250	            return;
+   251	          }
+   252	          if (opened_once) {
+   253	            void restore_state_after_reconnect();
+   254	          }
+   255	          opened_once = true;
+   256	        };
+   257	        event_source.addEventListener(
+   258	          "task.snapshot_changed",
+   259	          handle_task_snapshot_changed as EventListener,
+   260	        );
+
+hook: PostToolUse
+hook: PostToolUse
+hook: PostToolUse Completed
+hook: PostToolUse Completed
+hook: PreToolUse
+hook: PreToolUse
+hook: PreToolUse Completed
+hook: PreToolUse Completed
+exec
+/usr/bin/bash -lc "rg -n \"is_spelling_batch_active|spellingActivity|spelling activity\" src/frontend -g '"'!**/dist/**'"'" in /home/wilder/git-repos/LinguaGacha-upstream
+exec
+/usr/bin/bash -lc "nl -ba src/frontend/app/state/use-desktop-state.ts | sed -n '1,120p'" in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 373ms:
+     1	import { useContext, useSyncExternalStore } from "react";
+     2	
+     3	import {
+     4	  DesktopStateContext,
+     5	  DesktopStateStoresContext,
+     6	} from "@frontend/app/state/desktop-state-context";
+     7	
+     8	export function useDesktopState() {
+     9	  const context_value = useContext(DesktopStateContext);
+    10	
+    11	  if (context_value === null) {
+    12	    throw new Error("useDesktopState must be used inside DesktopStateProvider.");
+    13	  }
+    14	
+    15	  return context_value;
+    16	}
+    17	
+    18	/** 高频快照统一从稳定 stores context 取源，避免主 DesktopStateContext 被动刷新。 */
+    19	function useDesktopStateStores() {
+    20	  const stores = useContext(DesktopStateStoresContext);
+    21	  if (stores === null) throw new Error("Desktop state stores require a Provider.");
+    22	  return stores;
+    23	}
+    24	
+    25	/** 只订阅完整任务快照。 */
+    26	export function useTaskSnapshot() {
+    27	  const store = useDesktopStateStores().task;
+    28	  return useSyncExternalStore(store.subscribe, store.getSnapshot);
+    29	}
+    30	
+    31	/** 只订阅全局运行占用快照。 */
+    32	export function useRuntimeSnapshot() {
+    33	  const store = useDesktopStateStores().runtime;
+    34	  return useSyncExternalStore(store.subscribe, store.getSnapshot);
+    35	}
+    36	
+    37	/** 只订阅拼写活动快照：pending 计数与批活动状态。 */
+    38	export function useSpellingActivitySnapshot() {
+    39	  const store = useDesktopStateStores().spelling;
+    40	  return useSyncExternalStore(store.subscribe, store.getSnapshot);
+    41	}
+    42	
+    43	/** 只订阅项目 section 变更信号。 */
+    44	export function useProjectChangeSignal() {
+    45	  const store = useDesktopStateStores().projectChange;
+    46	  return useSyncExternalStore(store.subscribe, store.getSnapshot);
+    47	}
+    48	
+    49	/** 返回 task store 的稳定写入口，供命令 ack 与 SSE 同步。 */
+    50	export function useSyncTaskSnapshot() {
+    51	  return useDesktopStateStores().task.applySnapshot;
+    52	}
+
+ succeeded in 375ms:
+src/frontend/app/state/spelling-activity-store.ts:97:export function is_spelling_batch_active(
+src/frontend/app/state/spelling-activity-store.test.ts:8:describe("spelling activity store", () => {
+
+hook: PostToolUse
+hook: PostToolUse
+hook: PostToolUse Completed
+hook: PostToolUse Completed
+codex
+No findings. Residual risk: I did not execute the Vitest suite in this review.
+
+VERDICT: clean
+hook: Stop
+hook: Stop Completed
+tokens used
+52,834
+No findings. Residual risk: I did not execute the Vitest suite in this review.
+
+VERDICT: clean

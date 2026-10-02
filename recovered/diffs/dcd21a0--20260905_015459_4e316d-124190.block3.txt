@@ -1,0 +1,66 @@
+commit dcd21a00625f4172a3e1705dd9ccd1e3ca521c88
+tree 5644eb616f7b55bca8cb3622b1c6a4684e0a4a34
+parent 3f23c38525170666f81d747a4721d6afcb13cf79
+author mortang2410 <mortang2410@totally.mail> 1788546872 +0700
+committer mortang2410 <mortang2410@totally.mail> 1788546872 +0700
+
+    fix(backend): keep data: URL diagnostic under 256-char bound incl. ellipsis
+    
+    Codex review caught that the prior P2 fix produced 257 chars
+    (sliced 256 + ellipsis) when the meta prefix exceeded 256. The
+    marker now comes from inside the 256-char budget, so the final
+    data_head is always <= 256 chars.
+3f23c38525170666f81d747a4721d6afcb13cf79
+dcd21a00625f4172a3e1705dd9ccd1e3ca521c88
+
+exec
+/usr/bin/bash -lc 'env -u NODE_ENV mise exec node@24.19.0 -- npx vitest run --config buildtools/vitest/vitest.config.ts src/backend/network/repro-proxy-url-leak.test.ts src/backend/network/system-proxy-http-client.test.ts' in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 956ms:
+
+ RUN  v4.1.11 /home/wilder/git-repos/LinguaGacha-upstream
+
+[proxy-fetch] fetch.entered {"protocol":"https:","hostname":"api.example"}
+[proxy-fetch] fetch.dispatch_undici {"protocol":"https:","hostname":"api.example","loopback":false}
+[proxy-fetch] fetch.entered {"protocol":"https:","hostname":"api.example"}
+[proxy-fetch] fetch.dispatch_undici {"protocol":"https:","hostname":"api.example","loopback":false}
+[proxy-fetch] fetch.entered {"protocol":"http:","hostname":"127.0.0.1"}
+[proxy-fetch] fetch.dispatch_undici {"protocol":"http:","hostname":"127.0.0.1","loopback":true}
+[proxy-fetch] fetch.entered {"protocol":"https:","hostname":"api.example"}
+[proxy-fetch] fetch.entered {"protocol":"data:","data_head":"data:text/plain;base64"}
+[proxy-fetch] fetch.entered {"protocol":"data:","data_head":"data:text/html;base64"}
+[proxy-fetch] fetch.entered {"protocol":"https:","hostname":"example.com"}
+[proxy-fetch] fetch.dispatch_undici {"protocol":"https:","hostname":"example.com","loopback":false}
+[proxy-fetch] fetch.entered {"protocol":"https:","hostname":"api.example"}
+[proxy-fetch] fetch.dispatch_undici {"protocol":"https:","hostname":"api.example","loopback":false}
+[proxy-fetch] fetch.entered {"protocol":"https:","hostname":"api.example"}
+[proxy-fetch] fetch.dispatch_undici {"protocol":"https:","hostname":"api.example","loopback":false}
+
+ Test Files  2 passed (2)
+      Tests  16 passed (16)
+   Start at  01:57:06
+   Duration  185ms (transform 51ms, setup 29ms, import 94ms, tests 46ms, environment 0ms)
+
+
+exec
+/usr/bin/bash -lc "env -u NODE_ENV mise exec node@24.19.0 -- node - <<'NODE'
+for (const raw of [
+  'data:text/😀;base64,AAA',
+  'data:text/é;base64,AAA',
+  'data:text/𝄞;base64,AAA',
+  'data:text/\";base64,AAA',
+  'data:text/\\\\u{1f600};base64,AAA',
+]) {
+  try { const u = new URL(raw); console.log(JSON.stringify(raw), JSON.stringify(u.href), u.href.length); }
+  catch(e) { console.log('ERR', JSON.stringify(raw), String(e)); }
+}
+NODE" in /home/wilder/git-repos/LinguaGacha-upstream
+ succeeded in 398ms:
+"data:text/😀;base64,AAA" "data:text/%F0%9F%98%80;base64,AAA" 33
+"data:text/é;base64,AAA" "data:text/%C3%A9;base64,AAA" 27
+"data:text/𝄞;base64,AAA" "data:text/%F0%9D%84%9E;base64,AAA" 33
+"data:text/\";base64,AAA" "data:text/\";base64,AAA" 22
+"data:text/\\u{1f600};base64,AAA" "data:text/\\u{1f600};base64,AAA" 30
+
+codex
+The change correctly reserves space for the ellipsis, keeping `data_head` within the 256-character limit. Relevant network tests pass.
+The change correctly reserves space for the ellipsis, keeping `data_head` within the 256-character limit. Relevant network tests pass.

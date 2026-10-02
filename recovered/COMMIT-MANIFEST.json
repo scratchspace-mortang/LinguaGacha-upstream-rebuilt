@@ -1,0 +1,176 @@
+{
+ "note": "Every fact here is a verbatim excerpt from /home/wilder/.hermes/backups/recovery-20261002-230708/state.recovered.db (immutable=1). Each entry names the DB message id it came from. No entry is inferred from a commit that the transcript does not record.",
+ "upstream": {
+  "remote": "https://github.com/neavo/LinguaGacha",
+  "branch": "main",
+  "pin": "5a0058d57abfc6df371339818894097f3879bd28",
+  "clone_dir": "/home/wilder/git-repos/LinguaGacha-upstream-rebuilt",
+  "control_probe_this_session": "git cat-file -t 5a0058d57abfc6df371339818894097f3879bd28 -> commit",
+  "objects_in_control_clone": 37808
+ },
+ "chain": [
+  {
+   "short": "62af969",
+   "full": "62af9697f5251a0af64dd70dcaeb99980be010d7",
+   "subject": "feat(quality): 校对标点保留与拼写检查警告",
+   "author": "mortang2410 <mortang2410@totally.mail>",
+   "date": "Thu Sep 3 01:06:25 2026 +0700",
+   "evidence_messages": [110501, 120371],
+   "stat": "32 files changed, 2522 insertions(+), 3 deletions(-)",
+   "created_paths_verbatim": [
+    ".scratch/proofreading-punctuation-spelling/spec.md",
+    "docs/agent-notes/HANDOFF-proofreading-spelling-impl.md",
+    "docs/agent-notes/README.md",
+    "docs/agent-notes/headless-cli-operations.md",
+    "docs/agent-notes/proofreading-punctuation-spelling-spec.md",
+    "docs/agent-notes/reviewer-verification-log-2026-08-31.md",
+    "src/backend/proofreading/language-tool-client.test.ts",
+    "src/backend/proofreading/language-tool-client.ts",
+    "src/backend/proofreading/spelling-service.test.ts",
+    "src/backend/proofreading/spelling-service.ts"
+   ],
+   "modified_paths_from_truncated_stat": [
+    "builtin/translation_prompt/template/en/base.txt",
+    "builtin/translation_prompt/template/zh/base.txt",
+    "src/backend/agent/agent-workspace-contract.ts",
+    "src/backend/bootstrap/backend-services.ts",
+    "src/backend/cache/cache-manager.test.ts",
+    "src/backend/cache/cache-manager.ts",
+    "src/backend/cache/proofreading-cache.test.ts",
+    "src/backend/cache/proofreading-cache.ts"
+   ],
+   "note": "The transcript holds the first 16 diffstat lines of 32 files, and the 10 created paths. The other 16 modified paths are not recorded anywhere in the transcript."
+  },
+  {
+   "short": "0fa13e4",
+   "full": "0fa13e4d0080c4fce62abc1aaf8a18646450a266",
+   "subject": "docs(quality): 同步校对拼写检查长期文档",
+   "author": "mortang2410 <mortang2410@totally.mail>",
+   "date": "Thu Sep 3 01:22:40 2026 +0700",
+   "evidence_messages": [112818, 120371],
+   "stat": "2 files changed, 4 insertions(+), 2 deletions(-)",
+   "paths": ["docs/BACKEND.md", "docs/WORKFLOW.md"]
+  },
+  {
+   "short": "aaae9e2",
+   "full": "aaae9e29ed6c050254b6dc112ee450df1db45e75",
+   "subject": null,
+   "evidence_messages": [119078, 117380],
+   "note": "The transcript only ever shows this object as the target of a stash. No commit subject, no diffstat, no diff. It is a stash commit, not a commit on main."
+  },
+  {
+   "short": "60eee47",
+   "full": "60eee47479f958f9fce916ecdfa66d5be6e7ccb5",
+   "subject": "feat(harper): pending indicator + batch-end refresh (REVIEW STAGING)",
+   "evidence_messages": [123263, 123455, 124188],
+   "stat": null,
+   "note": "The subject line is recorded verbatim. No diffstat and no diff for this commit exist anywhere in the transcript."
+  },
+  {
+   "short": "4928dc2",
+   "full": "4928dc21b6b77a2781d4455e98b1e04e07d3b4d3",
+   "subject": "fix(harper): spelling-activity review fixes",
+   "author": "mortang2410 <mortang2410@totally.mail>",
+   "evidence_messages": [123504, 124160, 123552],
+   "stat": "10 files changed, 352 insertions(+), 13 deletions(-)",
+   "stat_is_truncated": true,
+   "paths_from_stat": [
+    "src/backend/api/api-routes.test.ts",
+    "src/backend/api/api-routes.ts",
+    "src/backend/network/repro-proxy-url-leak.test.ts",
+    "src/backend/network/system-proxy-http-client.ts",
+    "src/backend/proofreading/repro-project-scope.test.ts",
+    "src/backend/proofreading/repro-prune.test.ts",
+    "src/backend/proofreading/spelling-service.ts",
+    "src/frontend/app/state/desktop-event-stream.test.tsx",
+    "src/frontend/app/state/desktop-event-stream.ts",
+    "src/frontend/app/state/desktop-state-context.tsx",
+    "src/frontend/app/state/spelling-activity-store.test.ts",
+    "src/frontend/app/state/spelling-activity-store.ts",
+    "src/frontend/app/state/use-desktop-state.test.tsx"
+   ],
+   "note": "The stat block in message 124160 lists 13 paths, but the recorded commit stat says 10 files changed. The stat line in that message belongs to a wider review range, not to 4928dc2 alone. Treat the 13 paths as candidates, not as 4928dc2's file list."
+  },
+  {
+   "short": "f5ea30d",
+   "full": "f5ea30db2ece208b60f8a28a4773c07f3109158a",
+   "subject": "fix(harper): prevent re-render loop on identical spelling activity snapshots",
+   "author": "mortang2410 <mortang2410@totally.mail>",
+   "date": "Sat Sep 5 01:15:13 2026 +0700",
+   "evidence_messages": [123952, 123956, 124668],
+   "stat": "5 files changed, 75 insertions(+), 9 deletions(-)",
+   "message_body_recovered": true,
+   "diff_recovered": "partial (message 124668)"
+  },
+  {
+   "short": "3f23c38",
+   "full": "3f23c38525170666f81d747a4721d6afcb13cf79",
+   "subject": "fix(backend): bound data: URL diagnostic output to 256-char max",
+   "author": "mortang2410 <mortang2410@totally.mail>",
+   "date": "Sat Sep 5 01:26:58 2026 +0700",
+   "evidence_messages": [123952, 124010, 124185],
+   "stat": "1 file changed, 15 insertions(+), 4 deletions(-)",
+   "message_body_recovered": true,
+   "diff_recovered": "yes, for src/backend/network/system-proxy-http-client.ts"
+  },
+  {
+   "short": "dcd21a0",
+   "full": "dcd21a00625f4172a3e1705dd9ccd1e3ca521c88",
+   "subject": "fix(backend): keep data: URL diagnostic under 256-char bound incl. ellipsis",
+   "author": "mortang2410 <mortang2410@totally.mail>",
+   "evidence_messages": [124066, 124185, 124188],
+   "stat": "2 files changed, 32 insertions(+), 4 deletions(-)",
+   "parent_full": "3f23c38525170666f81d747a4721d6afcb13cf79",
+   "tree": "5644eb616f7b55bca8cb3622b1c6a4684e0a4a34",
+   "author_epoch": 1788546872,
+   "message_body_recovered": true,
+   "diff_recovered": "yes, for system-proxy-http-client.ts and repro-proxy-url-leak.test.ts (partial hunks)"
+  },
+  {
+   "short": "0016ea7",
+   "full": null,
+   "subject": "docs(quality): 同步校对 handoff v19 — 拼写检查修复完成",
+   "evidence_messages": [124149, 125166],
+   "note": "Found in the recovered log chain and recorded by this card's evidence, but not in the card's list of eight. Not rebuilt; listed so the chain is not silently truncated."
+  },
+  {
+   "short": "4659d47",
+   "full": null,
+   "subject": "fix(network): bound HTTP hostname diagnostics to 256 chars in url_diagnostic",
+   "evidence_messages": [125166],
+   "note": "Same as above."
+  },
+  {
+   "short": "9b14480",
+   "full": null,
+   "subject": "docs(agent): codify NODE_ENV=production rule in AGENTS.md §0 + handoff v20",
+   "evidence_messages": [125166],
+   "note": "Same as above."
+  },
+  {
+   "short": "9f2c947",
+   "full": "9f2c947a84e6cd1af0749e4e3de9230cbba1ab03",
+   "subject": "fix(frontend): defer listener notify via setTimeout(0) to prevent React max-update-depth crash",
+   "author": "mortang2410 <mortang2410@totally.mail>",
+   "date": "Sat Sep 5 09:57:43 2026 +0700",
+   "evidence_messages": [125138, 125166],
+   "stat": "2 files changed, 57 insertions(+), 7 deletions(-)",
+   "message_body_recovered": true,
+   "diff_recovered": "yes, for both files, partial hunks",
+   "note": "Not in the card's list of eight. Recorded because the recovered log chain shows it, and truncating the chain here would hide real lost work."
+  }
+ ],
+ "second_tree": {
+  "path": "/home/wilder/git-repos/LinguaGacha",
+  "exists_on_disk_now": false,
+  "was_a_git_repo": true,
+  "identity": "An older, Python-based LinguaGacha (frontend/*.py, backend/*.py, resource/prompt/<lang>/*.txt), not the TypeScript rewrite cloned as LinguaGacha-upstream.",
+  "evidence_messages": [102281, 102283, 102309, 107037, 107041],
+  "read_file_echoes_found": 0,
+  "suffix_glossary": {
+   "path": "resource/prompt/en/suffix_glossary.txt",
+   "size_bytes_at_the_time": 1100,
+   "recoverable": "partially: the full post-change line 1 survives verbatim; the remaining lines survive only in a truncated diff context."
+  }
+ }
+}

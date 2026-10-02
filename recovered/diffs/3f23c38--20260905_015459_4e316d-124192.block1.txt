@@ -1,0 +1,149 @@
+commit 3f23c38525170666f81d747a4721d6afcb13cf79
+Author:     mortang2410 <mortang2410@totally.mail>
+AuthorDate: Sat Sep 5 01:26:58 2026 +0700
+Commit:     mortang2410 <mortang2410@totally.mail>
+CommitDate: Sat Sep 5 01:26:58 2026 +0700
+
+    fix(backend): bound data: URL diagnostic output to 256-char max
+    
+    Previously url_diagnostic() returned the full data: URL meta-prefix
+    (up to the first comma) without any length cap. A malicious or
+    pathological data: URL with a very long meta section (e.g.
+    data:text/html;charset=utf-8;base64,<very long>) could bloat
+    stderr logs and leak content into diagnostic output.
+    
+    Now: no-comma data URLs return INVALID_DATA_URL_HEAD ("<invalid>")
+    instead of the full href; valid meta-prefix is capped at 256 chars.
+    
+    P2 finding from codex review of 0fa13e4.
+
+diff --git a/src/backend/network/system-proxy-http-client.ts b/src/backend/network/system-proxy-http-client.ts
+index e5c483e..e3794d2 100644
+--- a/src/backend/network/system-proxy-http-client.ts
++++ b/src/backend/network/system-proxy-http-client.ts
+@@ -223,14 +223,25 @@ function read_request_url(input: Parameters<typeof globalThis.fetch>[0]): URL {
+  * 拼装代理诊断输出，避免把查询字符串与 userinfo 写进 stderr：
+  * 自定义模型端点常用 query 携带 API key 与签名，data: URL 的 base64 payload
+  * 也可能携带内容。诊断需要的只是路由信息（协议 + 主机），其他字段省略。
++ * data: URL 的 meta 段（mimetype 与可选 ;base64 等）按
++ * MAX_DATA_URL_DIAGNOSTIC_PREFIX 截断，避免用户控制的长 meta
++ * 把任意字节塞进 stderr；无逗号的非法 data URL 不暴露原文。
+  */
++const MAX_DATA_URL_DIAGNOSTIC_PREFIX = 256;
++const INVALID_DATA_URL_HEAD = "<invalid>";
++
+ function url_diagnostic(url: URL): Record<string, unknown> {
+   if (url.protocol === "data:") {
+-    // data:<mime>;base64,<payload>：协议本身就是诊断信息，截断到 mime 前缀。
+-    // 没有逗号的非法 data URL 走完整 href——它本来就不会被处理，泄漏面小。
+     const comma = url.href.indexOf(",");
+-    const head = comma === -1 ? url.href : url.href.slice(0, comma);
+-    return { protocol: url.protocol, data_head: head };
++    if (comma === -1) {
++      return { protocol: url.protocol, data_head: INVALID_DATA_URL_HEAD };
++    }
++    const raw_head = url.href.slice(0, comma);
++    const data_head =
++      raw_head.length <= MAX_DATA_URL_DIAGNOSTIC_PREFIX
++        ? raw_head
++        : `${raw_head.slice(0, MAX_DATA_URL_DIAGNOSTIC_PREFIX)}…`;
++    return { protocol: url.protocol, data_head };
+   }
+   return { protocol: url.protocol, hostname: url.hostname };
+ }
+
+--- handoff relevant ---
+# LinguaGacha Harper — handoff v19 (2026-09-05)
+
+This handoff is for the next session. State at handoff: codex review round 1 → 3 are all clean; 5 commits on `main` ahead of `0fa13e4` (the prior Harper landing, inherited from v18).
+
+## State at handoff
+
+Five commits on `main` ahead of the v18 anchor `4928dc2`:
+
+1. `4928dc2` — original review fixes (carried in from v18).
+2. `f5ea30d` — re-render loop fix: spelling activity store now structurally guards identical snapshots; HTTP route returns `{spelling:…}` symmetric with SSE event shape; test stubs updated.
+3. `3f23c38` — data: URL diagnostic output capped at 256 chars.
+4. `dcd21a0` — data: URL diagnostic ellipsis marker kept inside the 256-char cap.
+5. (final HEAD) — HANDOFF-v19 doc.
+
+All checks green at handoff:
+- `tsc -b --noEmit` = 0 errors
+- `npm run lint` = 0 errors (11 pre-existing warnings in `.scratch/` and the pre-existing `src/gui/runtime/desktop-agent-workspace-runner.test.ts:534:41` `no-eval` warning)
+- vitest = 434 files / 2540 tests pass
+- `npm run check` = all four gates pass
+
+## What was fixed in this session
+
+| Finding | Source | Severity | Fix | Test |
+|---|---|---|---|---|
+| HTTP route `/api/proofreading/spelling-activity/snapshot` returned bare snapshot; renderer normalizer expected `{spelling:…}` (matching SSE) — reconnect refresh would have stayed stale at revision=0 | Codex round 1 | P1 | Backend route wraps as `{spelling: snapshot}`. Symmetric with SSE event shape. | `spelling-activity-store.test.ts` — normalizer rejects bare shape as safe default |
+| `data:` URL diagnostic prefix unbounded for no-comma inputs and for arbitrarily long MIME metadata | Codex round 1 | P2 | `url_diagnostic` bounds `data_head` to 256 chars; no-comma inputs return literal `"<invalid>"` instead of dumping the full href. | `repro-proxy-url-leak.test.ts` — added long-prefix regression test |
+| `data:` truncation marker was 1 char past the 256-char budget | Codex round 4 | P2 | Marker length is reserved from the budget so the final `data_head` is always ≤ 256 chars. | `repro-proxy-url-leak.test.ts` — assert `data_head.length ≤ 256` and `endsWith("…")` |
+| Spelling activity `applySnapshot` always created a new object reference even for identical incoming snapshots; `useSyncExternalStore` detected the change and re-rendered, cascading into React's "Maximum update depth exceeded" during a Re-spellcheck batch | User dev log (`/tmp/lingua-dev-9.log` shows 200+ identical errors at `spelling-activity-store.ts:35` via `desktop-event-stream.ts:119`) | P0 | Added structural-equality guard: if normalized snapshot equals current on (revision, pending, active), skip reassignment and notification. Same-revision but data-changed still passes through. | `spelling-activity-store.test.ts` — added two regression tests (silent-on-dup, pass-on-change) |
+| `desktop-event-stream.test.tsx` and `use-desktop-state.test.tsx` test stubs missing `applySpellingActivitySnapshot` and `spelling` store field after v18 changes | Build-time tsc error | P2 | Added both fields to mock options so `tsc -b` is clean. | n/a (test wiring) |
+
+## What was NOT fixed (false alarms)
+
+| Finding | Why skipped |
+|---|---|
+| Codex P0: clean checkout can't type-check | Dirty worktree confused codex; local `tsc -b --noEmit` = 0 confirms clean. |
+| Codex P1: package-lock.json missing Harper | Harper was already in `package.json` before v18. |
+| Codex P2: prune completed entries from `latest_dst_hash_by_item` | Map is bounded by per-project size and cleared on project switch; deletion on completion broke the requeue freshness guard (test `重跑上限内` failed). Reverted. |
+| (v18 carried) Round-2 review was killed mid-run by previous session; verdict never landed. | Re-ran codex on the v18 anchor (`4928dc2`) and captured the round-2 verdict at the start of v19. |
+
+## Why the re-render loop was the actual root cause
+
+`spelling-activity-store.ts` `applySnapshot` originally short-circuited only on `revision < current`. When the SSE handler fired for a re-emit of the same snapshot (the same revision N + same pending/active), the guard didn't trip; `snapshot = normalized_snapshot` assigned a fresh object; `for (const listener of listeners) listener()` synchronously called React's `forceStoreRerender`; React scheduled a re-render; the falling-edge `refresh_snapshot` effect fired inside the commit; that effect set multiple `useState` values; React detected nested updates and threw "Maximum update depth exceeded". The handler's `catch` block then reported the error. Repeat per SSE event → hundreds of errors per Re-spellcheck.
+
+The fix is at the source: when the data is identical, do not reassign and do not notify. React's `useSyncExternalStore` reads `getSnapshot()` between renders; if the snapshot reference is the same, no re-render. The structural-equality guard is the minimum change that breaks the cascade.
+
+## Key files in this session's commit range
+
+Backend:
+- `src/backend/api/api-routes.ts` — `/api/proofreading/spelling-activity/snapshot` returns `{spelling: snapshot}` (was bare snapshot).
+- `src/backend/network/system-proxy-http-client.ts` — `url_diagnostic` returns `{protocol, hostname}` for http(s); `{protocol, data_head}` for data: with 256-char cap including ellipsis marker; no-comma data: returns `{protocol, data_head: "<invalid>"}`.
+
+Frontend:
+- `src/frontend/app/state/spelling-activity-store.ts` — `applySnapshot` has revision + structural-equality guard.
+- `src/frontend/app/state/spelling-activity-store.test.ts` — 3 new tests: normalizer bare-shape default; identical-snapshot silent; same-revision data-change passes.
+
+Test wiring (build glue):
+- `src/frontend/app/state/desktop-event-stream.test.tsx` — `create_event_stream_options` adds `applySpellingActivitySnapshot: vi.fn()`.
+- `src/frontend/app/state/use-desktop-state.test.tsx` — `stores` adds `spelling: createSpellingActivityStore()`.
+- `src/backend/network/repro-proxy-url-leak.test.ts` — adds long-prefix regression test for the 256-char cap.
+
+## Verification commands
+
+```bash
+cd /home/wilder/git-repos/LinguaGacha-upstream
+git log --oneline -6
+
+# All these should exit 0
+env -u NODE_ENV mise exec node@24.19.0 -- npx tsc -b --noEmit
+env -u NODE_ENV mise exec node@24.19.0 -- npx vitest run --config buildtools/vitest/vitest.config.ts
+npm run lint
+npm run check
+```
+
+For the live app (recommended belt-and-suspenders):
+```bash
+cd /home/wilder/git-repos/LinguaGacha-upstream
+npm install --ignore-scripts   # install without electron postinstall (fails without electron binary)
+env -u NODE_ENV ELECTRON_DISABLE_SANDBOX=1 npm run dev 2>&1 | tee /tmp/lingua-dev-N.log
+grep -E '\[harper\]|\[proxy-fetch\]|setup\.(begin|linter_ready|done)' /tmp/lingua-dev-N.log
+```
+
+Trigger Re-spellcheck once and verify:
+- no new "Maximum update depth exceeded" entries appear in stderr
+- the spelling banner shows the spinner during the batch and the falling-edge refresh runs once after
+
+## Decisions to revisit if needed
+
+- **Other stores** (`task-snapshot-store.ts`, `runtime-activity-store.ts`) have the same `applySnapshot` shape without the structural-equality guard. They don't manifest the bug because their data doesn't change at high frequency. If task or runtime activity starts updating in tight bursts, apply the same guard.
+- **Indicator timing**: the pending indicator is driven by `store.pending.length > 0`. If the backend emits a zero-pending snapshot before all in-flight writes have settled, the indicator might flicker. The `batch_end` event from the backend is the correct settle signal; the frontend should use that rather than `pending.length` alone.
+
+--- backend docs relevant network ---
+
+codex
+The truncation change correctly reserves space for the ellipsis, and the targeted regression test passes.
